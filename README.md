@@ -20,7 +20,7 @@ All models share the structure: observed binary outcome y is Bernoulli with logi
 - NumPyro
 - NumPy, SciPy
 
-A single GPU with 32 GB memory should be able to handle a genetic relationship matrix of size up to 55,000.  
+A single GPU with 32 GB memory should be able to handle a genetic relationship matrix of up to 55,000 individuals.  
 
 ### Running the example
 
