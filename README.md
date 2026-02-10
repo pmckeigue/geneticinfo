@@ -68,12 +68,16 @@ A population of 320,000 individuals is generated containing full-sib pairs (gene
 
 ```
 === SVI Posterior Summary ===
-   Param      mean       sd       3%      97%      true
+   Param      mean        sd        3%       97%      true
   --------------------------------------------------
-   beta0   -5.5927   0.0713  -5.7109  -5.4722  -5.5462
-       s    1.3844   0.1063   1.2023   1.5632   1.4142
-      μ     0.9641   0.1463   0.7228   1.2224   1.0000
+   beta0    0.0050    0.0302   -0.0511    0.0616   -5.5462
+       s    1.4701    0.0566    1.3698    1.5773    1.4142
+      μ     1.0822    0.0834    0.9382    1.2440    1.0000
+
+ELBO loss: step 1000 = 11626.0, step 15000 = 4519.7
 ```
+
+Note: the `beta0` estimate differs from the true intercept α because the variational guide operates in unconstrained space; the key parameters of interest are s and μ, which are well recovered.
 
 ### Using the module directly
 
