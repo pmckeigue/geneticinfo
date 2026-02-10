@@ -81,6 +81,8 @@ ELBO loss: step 1000 = 11626.0, step 15000 = 4519.7
 
 Note: the `beta0` estimate differs from the true intercept α because the variational guide operates in unconstrained space; the key parameters of interest are s and μ, which are well recovered.
 
+![ELBO loss trace](elbo_trace.png)
+
 ### Using the module directly
 
 ```python
@@ -106,7 +108,6 @@ result = fit_svi_lowrank(M, jnp.array(L), jnp.array(y, dtype=jnp.float64))
 |------|-------------|
 | `geneticinfo.py` | Model definitions, SVI fitting, and simulation functions |
 | `run_example.py` | End-to-end example script |
-| `utils_mcmc.py` | Multi-page PDF diagnostic report for NUTS MCMC runs |
 
 ## References
 

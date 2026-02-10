@@ -10,6 +10,10 @@ os.environ.setdefault("XLA_PYTHON_CLIENT_MEM_FRACTION", "0.15")
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
 
 from geneticinfo import (
     simulate_casecontrol_related,
@@ -51,3 +55,16 @@ for name in ["beta0", "s", "mu"]:
 losses = result["losses"]
 print(f"\nELBO loss: step 1000 = {float(losses[999]):.1f}, "
       f"step {len(losses)} = {float(losses[-1]):.1f}")
+
+# --- Plot ELBO trace ---
+losses_np = np.asarray(losses)
+fig, ax = plt.subplots(figsize=(7, 4))
+ax.plot(losses_np, linewidth=0.5)
+ax.set_xlabel("SVI step")
+ax.set_ylabel("ELBO loss")
+ax.set_title("ELBO loss trace")
+fig.tight_layout()
+plot_path = os.path.join(os.path.dirname(__file__) or ".", "elbo_trace.png")
+fig.savefig(plot_path, dpi=150)
+plt.close(fig)
+print(f"\nELBO trace plot saved to {plot_path}")
