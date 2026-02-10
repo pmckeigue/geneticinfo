@@ -66,7 +66,11 @@ A population of 320,000 individuals is generated containing full-sib pairs (gene
 
 #### Model fitting
 
-`logistic_mvnorm` is fitted via SVI with an `AutoLowRankMultivariateNormal` variational guide (rank 20, 15000 steps, Rényi ELBO with α=0).  Posterior summaries with 94% credible intervals:
+`logistic_mvnorm` is fitted via SVI with an `AutoLowRankMultivariateNormal` variational guide (rank 20, 15000 steps, Rényi ELBO with α=0).  
+
+![ELBO loss trace](elbo_trace.png)
+
+#### Posterior summaries with 94% credible intervals:
 
 ```
 === SVI Posterior Summary ===
@@ -81,7 +85,7 @@ ELBO loss: step 1000 = 11626.0, step 15000 = 4519.7
 
 Note: the `beta0` estimate differs from the true intercept α because the variational guide operates in unconstrained space; the key parameters of interest are s and μ, which are well recovered.
 
-![ELBO loss trace](elbo_trace.png)
+
 
 ### Using the module directly
 
