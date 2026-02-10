@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.html
+*.pdf
+.ipynb_checkpoints/
+.claude/
+*.ipynb
+*.RData
+*.rds
+*.Rmd
+*.R
