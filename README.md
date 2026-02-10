@@ -2,7 +2,7 @@
 
 Bayesian inference of **genetic information for discrimination** from binary (case/control) traits.
 
-The key quantity being estimated is Λ (lambda) — the expected log-likelihood ratio (in nats) for genetic prediction of disease status.  Under the logistic polygenic model, Λ = log(λ_S) where λ_S is the sibling recurrence risk ratio (Clayton, 2009), and Λ = 0.5 s² where s is the scale of the class-conditional log-likelihood ratio distributions (McKeigue, 2019).
+The key quantity being estimated is Λ (lambda) — the expected log-likelihood ratio (in nats) favouring case over non-case status, given an individual's genetic risk (McKeigue, 2019). This gives the maximum expected information for discrimination that could be obtained from a polygenic risk score.  If the disease is rare (risk < 1%), Λ is not very large (< 1 natural log unit) and the log odds of genetic risk has a Gaussian distribution in controls, Λ = log(λ_S) where λ_S is the sibling recurrence risk ratio (Clayton, 2009), and Λ = 0.5 s² where s is the scale of the class-conditional distribution of log-likelihood ratio.
 
 ## Models
 
