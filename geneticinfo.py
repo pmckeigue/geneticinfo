@@ -56,6 +56,35 @@ def logistic_mix2_mvnorm(M=None, L=None, y=None, priorscale=5.0, priorloc=0.5, p
     return(logistic_mix2_mvnorm)
 
 
+def logistic_mix2_conditioned(M=None, L=None, y=None, priorscale=5.0, priorloc=0.5, prior_fam="halfnormal"):
+    """Mixture model with class assignments fixed to observed disease status.
+
+    Identical to logistic_mix2_mvnorm except the latent mixture indicator
+    for each individual is set equal to the observed y, so that cases draw
+    from the +mu component and controls from the -mu component.  This
+    eliminates the 2^M discrete multimodality that prevents NUTS from
+    mixing in the unconditioned mixture model.
+    """
+    p = jnp.mean(y)
+    beta0 = npyr.sample("beta0", dist.Normal(jnp.log(p / (1 - p)), 5))
+    if prior_fam == "lognormal":
+        s = npyr.sample("s", dist.LogNormal(loc=priorloc, scale=priorscale))
+    else:
+        s = npyr.sample("s", dist.HalfNormal(priorscale))
+    mu = npyr.deterministic("mu", 0.5 * s**2)
+
+    # Condition mixture component on observed y:
+    #   y=1 (case)    -> W ~ N(+mu, s²)
+    #   y=0 (control) -> W ~ N(-mu, s²)
+    loc = (2 * y - 1) * mu
+
+    with npyr.plate(name="M individuals", size=M):
+        W = npyr.sample("W", dist.Normal(loc, s))
+    Z = W - jnp.mean(W)
+    G = jnp.matmul(L, Z)
+    npyr.sample('y', dist.Bernoulli(logits=beta0 + G), obs=y)
+
+
 def lr_discrete(M=None, L=None, y=None, muprior=dist.Gamma, priorscale=0.75, priorloc=2.0):
     """Logistic mixed model with explicit discrete class-membership indicators.
 
@@ -91,6 +120,134 @@ def lr_discrete(M=None, L=None, y=None, muprior=dist.Gamma, priorscale=0.75, pri
     Z = Z_mix - (2.0 * p - 1.0) * mu
     G = numpyro.deterministic("G", jnp.matmul(Z, L.T))
     numpyro.sample("y", dist.Bernoulli(logits=beta0 + G), obs=y)
+
+
+def lr_discrete_blockdiag(L_blocks=None, y_flat=None, n_blocks=None, block_size=None,
+                           p_obs=None, muprior=dist.Gamma, priorscale=0.75, priorloc=2.0):
+    """Block-diagonal variant of lr_discrete for relatives-only data.
+
+    Operates on batched Cholesky factors of uniform-size family blocks,
+    using einsum for efficient batched matmul instead of a single large
+    M x M matrix multiply.
+
+    Parameters
+    ----------
+    L_blocks : jnp.ndarray, shape (n_blocks, block_size, block_size)
+        Per-block Cholesky factors of the genetic relationship sub-matrices.
+    y_flat : jnp.ndarray, shape (n_blocks * block_size,)
+        Flattened binary outcomes, block-contiguous.
+    n_blocks : int
+        Number of family blocks.
+    block_size : int
+        Uniform size of each block.
+    p_obs : float
+        Observed case proportion in the full sample (for the Beta prior).
+    muprior, priorscale, priorloc :
+        Prior family and hyperparameters for mu (same as lr_discrete).
+    """
+    M = n_blocks * block_size
+
+    K = 20
+    p = numpyro.sample("p", dist.Beta(K * p_obs, K * (1.0 - p_obs)))
+    beta0 = jnp.log(p / (1.0 - p))
+
+    mu = numpyro.sample("mu", muprior(priorloc, priorscale))
+    s = numpyro.deterministic("s", jnp.sqrt(2.0 * mu))
+
+    component_loc = jnp.stack([-mu, mu], axis=0)
+    component_scale = jnp.stack([s, s], axis=0)
+    mixing_probs = jnp.array([1.0 - p, p])
+
+    with numpyro.plate("individuals", M, dim=-1):
+        z = numpyro.sample("z", dist.Categorical(probs=mixing_probs),
+                           infer={"enumerate": "sequential"})
+
+        loc_z = Vindex(component_loc)[z]
+        scale_z = Vindex(component_scale)[z]
+
+        with handlers.reparam(config={"Z_mix": LocScaleReparam(centered=0)}):
+            Z_mix = numpyro.sample("Z_mix", dist.Normal(loc=loc_z, scale=scale_z))
+
+    Z = Z_mix - (2.0 * p - 1.0) * mu
+    # Batched block matmul: Z @ L.T per block via einsum
+    Z_blocks = Z.reshape(n_blocks, block_size)
+    G_blocks = jnp.einsum('bi,bji->bj', Z_blocks, L_blocks)
+    G = numpyro.deterministic("G", G_blocks.reshape(-1))
+
+    numpyro.sample("y", dist.Bernoulli(logits=beta0 + G), obs=y_flat)
+
+
+# ---------------------------------------------------------------------
+# Block-diagonal preprocessing
+# ---------------------------------------------------------------------
+def find_blocks(A):
+    """Find connected components (families) in the genetic relationship matrix.
+
+    Uses off-diagonal structure of A to identify groups of related individuals.
+
+    Parameters
+    ----------
+    A : ndarray, shape (M, M)
+        Genetic relationship matrix.
+
+    Returns
+    -------
+    blocks : list of ndarray
+        Each element contains row indices of one connected component,
+        sorted by block size descending.
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    M = A.shape[0]
+    off_diag = np.abs(A) - np.eye(M)
+    mask = off_diag > 1e-10
+    n_comp, labels = connected_components(
+        csr_matrix(mask.astype(float)), directed=False
+    )
+    blocks = [np.where(labels == c)[0] for c in range(n_comp)]
+    blocks.sort(key=len, reverse=True)
+    return blocks
+
+
+def reduce_to_relatives(A, y, min_block_size=2):
+    """Remove singletons, keeping only individuals with relatives in the sample.
+
+    Constructs a reduced relationship matrix, its Cholesky factor, and
+    outcome vector for individuals in connected components of size >= min_block_size.
+    The returned arrays are ordered so that blocks are contiguous.
+
+    Parameters
+    ----------
+    A : ndarray, shape (M, M)
+        Genetic relationship matrix.
+    y : ndarray, shape (M,)
+        Binary outcome.
+    min_block_size : int
+        Minimum block size to retain.
+
+    Returns
+    -------
+    y_red : ndarray, shape (M_red,)
+    A_red : ndarray, shape (M_red, M_red)
+    L_red : ndarray, shape (M_red, M_red)
+    kept_idx : ndarray of int, shape (M_red,)
+        Original indices of kept individuals.
+    block_sizes : list of int
+        Size of each retained block.
+    """
+    blocks = find_blocks(A)
+    kept = [b for b in blocks if len(b) >= min_block_size]
+    if not kept:
+        empty = np.array([], dtype=int)
+        return (np.array([]), np.empty((0, 0)), np.empty((0, 0)),
+                empty, [])
+    kept_idx = np.concatenate(kept)
+    y_red = y[kept_idx]
+    A_red = A[np.ix_(kept_idx, kept_idx)]
+    L_red = np.linalg.cholesky(A_red)
+    block_sizes = [len(b) for b in kept]
+    return y_red, A_red, L_red, kept_idx, block_sizes
 
 
 # ---------------------------------------------------------------------
@@ -170,167 +327,6 @@ def fit_svi_lowrank(
 
 
 # ---------------------------------------------------------------------
-# Simulation: sib-pair case-control dataset
-# ---------------------------------------------------------------------
-def simulate_sibpair_data(
-    n_pairs_pop=2_000_000,
-    K=0.01,
-    mu_true=1.0,
-    n_concordant_case=None,
-    n_discordant=1000,
-    n_concordant_control=500,
-    seed=42,
-):
-    """Simulate a sib-pair case-control dataset.
-
-    Generates a large population of sib pairs whose joint disease status
-    follows the marginal and conditional probabilities implied by:
-
-      - population prevalence  K
-      - sibling recurrence risk ratio  lambda_S = exp(mu_true)
-
-    Complete sib pairs are then sampled by concordance type (both
-    affected, discordant, both unaffected) so that the dataset is
-    informative for estimating mu.
-
-    Parameters
-    ----------
-    n_pairs_pop : int
-        Number of sib pairs in the simulated population.
-    K : float
-        Population disease prevalence.
-    mu_true : float
-        True expected log-likelihood ratio (nats).  Equivalently,
-        log(lambda_S) where lambda_S is the sibling recurrence risk ratio.
-    n_concordant_case : int or None
-        Concordant affected pairs to retain (None keeps all available).
-    n_discordant : int
-        Discordant pairs to retain.
-    n_concordant_control : int
-        Concordant unaffected pairs to retain.
-    seed : int
-        Random seed.
-
-    Returns
-    -------
-    y : ndarray of int, shape (M,)
-        Case/control status (1/0).
-    C : ndarray, shape (M, M)
-        Genetic relationship (correlation) matrix.
-    L : ndarray, shape (M, M)
-        Cholesky factor of C.
-    info : dict
-        True parameters and sample composition.
-    """
-    rng = np.random.default_rng(seed)
-
-    lambda_S = np.exp(mu_true)
-    s_true = np.sqrt(2.0 * mu_true)
-
-    # --- Joint sib-pair probabilities ---
-    #   P(y2=1 | y1=1) = K * lambda_S
-    #   P(y2=1 | y1=0) = K * (1 - K*lambda_S) / (1 - K)
-    p_aff_given_aff = K * lambda_S
-    p_aff_given_unaff = K * (1.0 - K * lambda_S) / (1.0 - K)
-
-    assert 0.0 < p_aff_given_aff < 1.0, (
-        f"K*lambda_S = {p_aff_given_aff:.4f} outside (0,1); "
-        "lambda_S too large for this prevalence"
-    )
-
-    # --- Simulate population of sib pairs ---
-    y1 = (rng.random(n_pairs_pop) < K).astype(np.int8)
-    y2_prob = np.where(y1, p_aff_given_aff, p_aff_given_unaff)
-    y2 = (rng.random(n_pairs_pop) < y2_prob).astype(np.int8)
-
-    # Classify pairs
-    pair_sum = y1 + y2
-    idx_cc   = np.where(pair_sum == 2)[0]   # both affected
-    idx_disc = np.where(pair_sum == 1)[0]   # one affected
-    idx_ctrl = np.where(pair_sum == 0)[0]   # both unaffected
-
-    n_cc_pop   = len(idx_cc)
-    n_disc_pop = len(idx_disc)
-    n_ctrl_pop = len(idx_ctrl)
-
-    # --- Sample complete pairs by concordance type ---
-    n_cc   = n_cc_pop if n_concordant_case is None else min(n_concordant_case, n_cc_pop)
-    n_disc = min(n_discordant, n_disc_pop)
-    n_ctrl = min(n_concordant_control, n_ctrl_pop)
-
-    sampled_cc   = rng.choice(idx_cc,   size=n_cc,   replace=False)
-    sampled_disc = rng.choice(idx_disc, size=n_disc, replace=False)
-    sampled_ctrl = rng.choice(idx_ctrl, size=n_ctrl, replace=False)
-
-    sampled_pairs = np.sort(np.concatenate([sampled_cc, sampled_disc, sampled_ctrl]))
-    n_pairs = len(sampled_pairs)
-
-    # Interleave sibs: [sib1_pair0, sib2_pair0, sib1_pair1, sib2_pair1, ...]
-    y = np.empty(2 * n_pairs, dtype=int)
-    y[0::2] = y1[sampled_pairs]
-    y[1::2] = y2[sampled_pairs]
-    M = len(y)
-
-    # --- Block-diagonal relationship matrix ---
-    C = np.eye(M, dtype=np.float64)
-    for k in range(n_pairs):
-        i, j = 2 * k, 2 * k + 1
-        C[i, j] = C[j, i] = 0.5
-    L = np.linalg.cholesky(C)
-
-    # --- Empirical lambda_S from the full population ---
-    n_y1_aff = np.sum(y1 == 1)
-    empirical_lambda_S = (np.mean(y2[y1 == 1]) / K) if n_y1_aff > 0 else np.nan
-
-    n_cases = int(np.sum(y))
-    n_controls = M - n_cases
-
-    info = dict(
-        mu_true=mu_true,
-        s_true=s_true,
-        lambda_S_true=lambda_S,
-        K=K,
-        n_pairs_pop=n_pairs_pop,
-        pop_concordant_case=n_cc_pop,
-        pop_discordant=n_disc_pop,
-        pop_concordant_control=n_ctrl_pop,
-        sample_concordant_case=n_cc,
-        sample_discordant=n_disc,
-        sample_concordant_control=n_ctrl,
-        n_pairs=n_pairs,
-        M=M,
-        n_cases=n_cases,
-        n_controls=n_controls,
-        empirical_lambda_S=empirical_lambda_S,
-    )
-    return y, C, L, info
-
-
-def print_sim_summary(info):
-    """Print a concise summary of the simulated dataset."""
-    print("=== Population ===")
-    print(f"  Sib pairs simulated:   {info['n_pairs_pop']:>12,}")
-    print(f"  Both affected:         {info['pop_concordant_case']:>12,}"
-          f"  ({100 * info['pop_concordant_case'] / info['n_pairs_pop']:.4f}%)")
-    print(f"  Discordant:            {info['pop_discordant']:>12,}"
-          f"  ({100 * info['pop_discordant'] / info['n_pairs_pop']:.4f}%)")
-    print(f"  Both unaffected:       {info['pop_concordant_control']:>12,}"
-          f"  ({100 * info['pop_concordant_control'] / info['n_pairs_pop']:.4f}%)")
-    print(f"  Empirical lambda_S:    {info['empirical_lambda_S']:.4f}"
-          f"  (true: {info['lambda_S_true']:.4f})")
-
-    print("\n=== Sampled pairs ===")
-    print(f"  Both affected:         {info['sample_concordant_case']:>6}")
-    print(f"  Discordant:            {info['sample_discordant']:>6}")
-    print(f"  Both unaffected:       {info['sample_concordant_control']:>6}")
-    print(f"  Total pairs:           {info['n_pairs']:>6}  →  {info['M']} individuals")
-    print(f"  Cases: {info['n_cases']},  Controls: {info['n_controls']}")
-
-    print("\n=== True parameters ===")
-    print(f"  mu       = {info['mu_true']:.4f}  (expected log-LR, nats)")
-    print(f"  s        = {info['s_true']:.4f}")
-    print(f"  lambda_S = {info['lambda_S_true']:.4f}")
-    print(f"  K        = {info['K']:.4f}")
 
 
 # ---------------------------------------------------------------------
@@ -339,10 +335,11 @@ def print_sim_summary(info):
 def simulate_casecontrol_related(
     n_fullsib_pairs=100_000,
     n_halfsib_pairs=10_000,
-    n_unrelated=100_000,
+    n_unrelated=1000,
     K=0.01,
     mu=1.0,
     seed=42,
+    return_genotypic_values=False,
 ):
     """Simulate case-control data from a population with related individuals.
 
@@ -377,6 +374,9 @@ def simulate_casecontrol_related(
         of genotypic values is 2*mu.
     seed : int
         Random seed.
+    return_genotypic_values : bool
+        If True, return the genotypic values for the sampled individuals
+        as a fifth element of the returned tuple.
 
     Returns
     -------
@@ -388,6 +388,9 @@ def simulate_casecontrol_related(
         Cholesky factor of A_sample.
     info : dict
         Simulation parameters and diagnostics including empirical lambda_S.
+    g_sample : ndarray of float, shape (M,)
+        Genotypic values for the sampled individuals (only if
+        return_genotypic_values is True).
     """
     from scipy.optimize import brentq
     from scipy.special import expit
@@ -509,6 +512,10 @@ def simulate_casecontrol_related(
         empirical_lambda_S=empirical_lambda_S,
     )
 
+    if return_genotypic_values:
+        g_sample = g[sample_idx]
+        return y_sample, A_sample, L_sample, info, g_sample
+
     return y_sample, A_sample, L_sample, info
 
 
@@ -550,6 +557,6 @@ def print_casecontrol_summary(info):
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     y, A, L, info = simulate_casecontrol_related(
-        n_fullsib_pairs=10_000, n_halfsib_pairs=1_000, n_unrelated=10_000,
+        n_fullsib_pairs=100_000, n_halfsib_pairs=10_000, n_unrelated=1000,
     )
     print_casecontrol_summary(info)
