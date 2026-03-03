@@ -428,6 +428,7 @@ def simulate_casecontrol_related(
     # --- Simulate disease status ---
     y = rng.binomial(1, expit(alpha + g)).astype(int)
     observed_K = y.mean()
+    print(y.shape)
 
     # --- Empirical lambda_S from full-sib pairs ---
     y_fs = y[: 2 * n_fullsib_pairs].reshape(n_fullsib_pairs, 2)
@@ -550,6 +551,112 @@ def print_casecontrol_summary(info):
     print(f"  s        = {info['s']:.4f}")
     print(f"  alpha    = {info['alpha']:.4f}  (intercept)")
     print(f"  K        = {info['K_target']:.4f}")
+
+
+
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.columns import Columns
+from rich.layout import Layout
+
+
+def create_data(seed, K, lambdaS):
+    # ---------------------------------------------------------------------
+    # 1. User-adjustable settings
+    # ---------------------------------------------------------------------
+    SEED        = seed          # for reproducibility
+    N_PAIRS     = 80_000     # how many sibling pairs in the population
+    POP_K       = K       # prevalence in the general population
+    SIB_K       = lambdaS * K     # recurrence risk in sibs of a case
+    # ---------------------------------------------------------------------
+    rng = np.random.default_rng(SEED)
+    
+    # ---------------------------------------------------------------------
+    # 2. Simulate the phenotypes for N_PAIRS sibling pairs
+    #    (very simple conditional model: first sib = "proband")
+    # ---------------------------------------------------------------------
+    y1 = rng.random(N_PAIRS) < POP_K                 # proband status
+    y2 = rng.random(N_PAIRS) < np.where(y1, SIB_K, POP_K)   # second sib
+    console = Console()
+
+    table = Table(title="Data simulation target and achieved")
+    table.add_column("")
+    table.add_column("")
+    table.add_row("Target log Sibling risk", f"{np.log(lambdaS):.2f}")
+    table.add_row("Empirical sample log Sibling risk", f"{np.log(y2[y1==1].mean()/y1.mean()):.2f}")
+    table1 = table
+
+    table = Table(title="Disease status in simulated data")
+    table.add_column("")
+    table.add_column("Proband control")
+    table.add_column("Proband case")
+    table.add_column("Total")
+    table.add_row("Sibling control", f"{((y1 == 0) & (y2 == 0)).sum()}", f"{((y1 == 1) & (y2 == 0)).sum()}", f"{((y2 == 0)).sum()}")
+    table.add_row("Sibling case", f"{((y1 == 0) & (y2 == 1)).sum()}", f"{((y1 == 1) & (y2 == 1)).sum()}", f"{((y2 == 1)).sum()}")
+    table.add_row("Total", f"{((y1 == 0)).sum()}", f"{((y1 == 1)).sum()}", f"{((y2 == 1)|(y2==0)).sum()}")
+
+    table2 = table
+    emplogs = np.log(y2[y1==1].mean()/y1.mean())
+    # stack the individuals
+    y_all          = np.concatenate([y1, y2]).astype(int)   # (2*N_PAIRS,)
+    fam_id_all     = np.concatenate([np.arange(N_PAIRS), 
+                                    np.arange(N_PAIRS)]) 
+    within_pair_ix = np.tile([0, 1], N_PAIRS)               # 0,1,0,1,...
+    
+    # ---------------------------------------------------------------------
+    # 3. Case/control selection: keep every case + equal # controls
+    # ---------------------------------------------------------------------
+    case_idx      = np.where(y_all == 1)[0]
+    n_cases       = len(case_idx)
+    
+    ctrl_idx_pool = np.where(y_all == 0)[0]
+    ctrl_idx      = rng.choice(ctrl_idx_pool, size=n_cases, replace=False)
+    
+    keep_idx      = np.sort(np.concatenate([case_idx, ctrl_idx]))  # final order
+    y             = y_all[keep_idx]
+    fam_id        = fam_id_all[keep_idx]
+    
+    M = len(keep_idx)        # total sample size (cases + controls)
+    # ---------------------------------------------------------------------
+    # 4. Build the M × M genetic correlation matrix
+    # ---------------------------------------------------------------------
+    G = np.eye(M, dtype=float)                # start with the diagonal = 1
+    H = -np.ones_like(G, dtype=float)                # start with the diagonal = 1
+    # pairs that belong to the same family get correlation 0.5
+    # (makes block-diagonal 2×2 sub-matrices)
+    y1 = []
+    y2 = []
+    for fid in np.unique(fam_id):
+        members = np.where(fam_id == fid)[0]
+        if len(members) == 2:                 # a complete sibling pair selected
+            i, j = members                    # unpack the two indices
+            G[i, j] = G[j, i] = 0.5
+            H[i, j] = H[j, i] = y[i] + y[j]
+            y1.append(y[i])
+            y2.append(y[j])
+
+    y1 = np.array(y1)
+    y2 = np.array(y2)
+     
+    table = Table(title=f"Simulated cases-control: Sample size  M = {M}  ({n_cases} cases, {n_cases} controls)\nDistribution of cases in siblings")
+    table.add_column("")
+    table.add_column("Proband control")
+    table.add_column("Proband case")
+    table.add_column("Total")
+    table.add_row("Sibling control", f"{((y1 == 0) & (y2 == 0)).sum()}", f"{((y1 == 1) & (y2 == 0)).sum()}", f"{((y2 == 0)).sum()}")
+    table.add_row("Sibling case", f"{((y1 == 0) & (y2 == 1)).sum()}", f"{((y1 == 1) & (y2 == 1)).sum()}", f"{((y2 == 1)).sum()}")
+    table.add_row("Total", f"{((y1 == 0)).sum()}", f"{((y1 == 1)).sum()}", f"{((y2 == 1)|(y2==0)).sum()}")
+    table3 = table
+    console.print(Panel(Group(Columns([table1, table2, table3], expand=True)), title="Data simulation"))
+
+    # put add a constant to those who have the same phenotype
+    # ---------------------------------------------------------------------
+    # 5. Cholesky factor (lower triangular)
+    # ---------------------------------------------------------------------
+    L = np.linalg.cholesky(G)                 # NumPy returns lower-triangular L
+    GG = L @ L.T
+    return M, L, y, y, emplogs
 
 
 # ---------------------------------------------------------------------
