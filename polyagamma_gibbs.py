@@ -25,6 +25,7 @@ os.environ.setdefault("OMP_NUM_THREADS", "1")
 
 import argparse
 import pickle
+import matplotlib.pyplot as plt
 import arviz as az
 from dataclasses import dataclass
 from typing import List, Tuple, Dict, Optional
