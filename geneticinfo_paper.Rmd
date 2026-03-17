@@ -1,0 +1,911 @@
+---
+title: "Quantifying the genetic effect on binary traits as the information for discrimination"
+author: "Paul McKeigue"
+date: "`r format(Sys.time(), '%-d %B %Y')`"
+geometry: "margin=2.5cm"
+header-includes:
+  - \usepackage{amsmath}
+  - \usepackage{amssymb}
+  - \usepackage{bm}
+  - \newcommand{\E}{\mathbb{E}}
+  - \newcommand{\Var}{\operatorname{Var}}
+  - \newcommand{\N}{\mathcal{N}}
+  - \usepackage{float}
+output:
+  pdf_document:
+    keep_tex: false
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(crop = FALSE, dev = "cairo_pdf", echo = FALSE, fig.pos = 'H')
+
+# Helper functions used in multiple chunks
+marginal_S <- function(gam, sigma2, n = 400L) {
+  sig <- sqrt(sigma2)
+  g   <- seq(-7 * sig, 7 * sig, length.out = n)
+  sum(exp(-gam * exp(g)) * dnorm(g, 0, sig)) * (g[2] - g[1])
+}
+find_gam <- function(K_target, sigma2) {
+  obj <- function(lg) 1 - marginal_S(exp(lg), sigma2) - K_target
+  exp(uniroot(obj, c(-20, 10), tol = 1e-9)$root)
+}
+```
+
+# The logistic polygenic model
+A natural way to model the relationship of predictors to a binary outcome is a logistic regression model, in which the effects of independent predictors are additive on a logistic scale. Additivity of effects on a logistic scale maximizes the entropy of the outcome $Y$ given the predictors $X$ subject to the constraint that the fitted averages of the conditional distributions of $Y \mid X$ equate to the observed averages of these distributions on the training data  [Good (1963)](https://projecteuclid.org/euclid.aoms/1177704014).  This supports using the logistic regression model unless other information about the dependence of $Y$ on $X$ is available: to use any other model would be to use information we do not have. I'll use the term _logistic polygenic model_ to denote a model in which polygenic effects on the outcome are additive on the logistic scale.
+
+For a polygenic model, where the total genetic effect is the sum of many independent genetic variants, the class-conditional distributions of the linear predictor will be approximately Gaussian.  If the linear predictor (posterior log odds) is standardized by subtracting the prior log odds, it equates to the log likelihood ratio (weight of evidence) favouring case over noncase status.  The probability densities of the weight of evidence $W$ in cases and in noncases are related by the identity f(W | case) = e^W  f(W | noncase).  
+
+The expected information for discrimination is the expectation of the weight of evidence favouring the true hypothesis over the false hypothesis, averaged over the two class-conditional distributions.  
+
+If one of these distributions is Gaussian, the distributions in cases and noncases will will both be Gaussian with means $\Lambda, -\Lambda$ respectively and variance $2 \Lambda$ when natural logarithms are used.  This result is attributed to Turing.  
+
+If the class-conditional distributions are Gaussian, the expected information for discrimination is simply $\Lambda$ as defined above. equal to half the variance of the linear predictor. 
+
+For a model learned from a training dataset, $\Lambda$ should be estimated not from the variance of the polygenic score (which might overfit the training dataset) but from test data by by subtracting the prior log odds from the posterior log odds, and taking the average over all observations in the test dataset.
+
+[Pharaoh et al (2002)](https://www.ncbi.nlm.nih.gov/pubmed/11984562) and [Clayton (2009)](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC2703795) showed that under a logistic polygenic model where the class-conditional distributions are Gaussian and the disease is rare, the expected genetic information for discrimination $\Lambda = \log{\lambda_S}$, where $\lambda_S$ is the sibling recurrence risk ratio.  So for instance where the sibling recurrence risk ratio is 4, the expected genetic information for discrimination is 2 bits and the optimal $C-statistic of a genetic predictor (if complete genotypes and a training sample of infinite size were available) is 0.88.
+
+More generally, under this logistic polygenic model for a rare disease, the log recurrence risk ratio scales with the coefficient of relationship.  [Collins et al](https://www.ncbi.nlm.nih.gov/pmc/articles/PMC38615/) used this to examine how well the logistic polygenic model fits the observed recurrence risks.  They used the term "beta model" for the logistic polygenic model; their beta parameter corresponds to $\Lambda$ expressed in natural log units.  They examined the fit of this model to the observed recurrence risks in relatives for twelve complex diseases: only for Alzheimer disease and for schizophrenia was there strong evidence of departure from a model in which effects are additive on a logistic scale.
+
+# Model Setup
+
+Let $G$ denote the genotypic value of an individual drawn at random from the population.
+We assume that at baseline (before age of onset of the disease): 
+$$
+G \sim \N(0, \sigma^2).
+$$
+The log probability of disease in a short interval of length $dt$ is
+$$
+\log(dt) + \beta_0 + G,
+$$
+so the instantaneous hazard rate is
+$$
+h(t \mid G) = e^{\beta_0 + G}.
+$$
+This is a proportional-hazards (exponential survival) model with log-normal frailty $e^G$.
+
+**Cumulative hazard.** The individual cumulative hazard up to time $t$ is
+$$
+H(t \mid G) = \int_0^t h(u \mid G)\, du = t\, e^{\beta_0 + G} = \gamma e^G,
+$$
+where $\gamma = t\,e^{\beta_0}$ is the cumulative baseline hazard.
+
+**Conditional survival function.**
+$$
+S(t \mid G) = \exp\!\bigl(-H(t \mid G)\bigr) = \exp\!\bigl(-\gamma e^G\bigr).
+$$
+
+**Marginal survival and prevalence.** Integrating over the population distribution of $G$,
+$$
+S(t) = \E\!\left[e^{-\gamma e^G}\right], \qquad K(t) = 1 - S(t) = \Pr(\text{case by } t).
+$$
+where $K(t)$ is the prevalence at time $t$ (if cases remain in the population).
+
+The marginal survival $S(t;\gamma')$ is the Laplace transform of the log-normal frailty
+$e^G$ evaluated at $\gamma'$; it does not have a closed-form expression in elementary
+functions, but is straightforward to evaluate numerically.
+
+---
+
+# Summary: distributions of genotypic values in noncases and cases
+
+| Quantity | Noncases | Cases |
+|---|---|---|
+| Conditional density | $f_{G\mid\text{noncase}}(g) \propto e^{-\gamma e^g}\,\varphi_\sigma(g)$ | $f_{G\mid\text{case}}(g) \propto (1-e^{-\gamma e^g})\,\varphi_\sigma(g)$ |
+| MGF | $\dfrac{e^{\theta^2\sigma^2/2}\,S(t;\,\gamma e^{\theta\sigma^2})}{S(t;\,\gamma)}$ | $\dfrac{e^{\theta^2\sigma^2/2}\,K(t;\,\gamma e^{\theta\sigma^2})}{K(t;\,\gamma)}$ |
+| Mean $\E[G\mid\cdot]$ | $\sigma^2\,\dfrac{d\log(1-K)}{d\beta_0} \;<\; 0$ | $\sigma^2\,\dfrac{d\log K}{d\beta_0} \;>\; 0$ |
+| Low-prevalence limit | $G\mid\text{noncase}\to\N(0,\sigma^2)$ | $G\mid\text{case}\to\N(\sigma^2,\sigma^2)$ |
+
+$\varphi_\sigma(g) = (2\pi\sigma^2)^{-1/2}\exp(-g^2/2\sigma^2)$ denotes the $\N(0,\sigma^2)$ density
+
+Here $\gamma = te^{\beta_0}$, $K(t;\gamma') = 1 - \E_{N(0,\sigma^2)}[e^{-\gamma'e^G}]$,
+and $\frac{dK}{d\beta_0} = \E[H(t,G)\,e^{-H(t,G)}] > 0$.
+
+
+Figure 1 below illustrates the conditional distributions of $G$ in cases and noncases
+for $\sigma^2 = 2$, contrasting the low-prevalence limit with $K = 0.10$.
+
+```{r fig_distributions, message=FALSE, warning=FALSE, fig.cap="Distributions of the genotypic value $G$ in cases (red) and noncases (blue) for $\\sigma^2 = 2$, at the low-prevalence limit (left) and at prevalence $K = 0.10$ (right).  In the limit the case distribution is $\\mathcal{N}(2,2)$ (analytical); at finite $K$ the distributions are evaluated numerically.  The population distribution $\\mathcal{N}(0,2)$ is shown in grey for reference.", fig.width=7, fig.height=3.8}
+
+library(ggplot2)
+
+sigma2  <- 2
+sig     <- sqrt(2)
+g_seq   <- seq(-4, 7, length.out = 500)
+dg      <- g_seq[2] - g_seq[1]
+
+K_scenarios <- c(0, 0.10)
+K_labels    <- c("Low-prev. limit (K -> 0)", "K = 0.10")
+
+dens_df <- do.call(rbind, mapply(function(K, lab) {
+  phi <- dnorm(g_seq, 0, sig)
+  if (K == 0) {
+    # Analytical limit: case ~ N(sigma2, sigma2), noncase ~ N(0, sigma2)
+    d_case    <- dnorm(g_seq, mean = sigma2, sd = sig)
+    d_noncase <- phi
+  } else {
+    gam <- find_gam(K, sigma2)
+    S_g <- exp(-gam * exp(g_seq))        # P(noncase | G = g)
+    K_g <- 1 - S_g                       # P(case    | G = g)
+    d_case    <- K_g * phi / (sum(K_g * phi) * dg)
+    d_noncase <- S_g * phi / (sum(S_g * phi) * dg)
+  }
+  rbind(
+    data.frame(g = g_seq, density = d_case,    status = "Case",    K_label = lab),
+    data.frame(g = g_seq, density = d_noncase, status = "Noncase", K_label = lab)
+  )
+}, K_scenarios, K_labels, SIMPLIFY = FALSE))
+
+dens_df$K_label <- factor(dens_df$K_label, levels = K_labels)
+dens_df$status  <- factor(dens_df$status,  levels = c("Case", "Noncase"))
+
+# Population N(0,2) reference
+pop_df <- data.frame(g = g_seq, density = dnorm(g_seq, 0, sig))
+
+ggplot(dens_df, aes(x = g, y = density, colour = status)) +
+  geom_line(data = pop_df, aes(x = g, y = density),
+            colour = "grey70", linetype = "dotted", linewidth = 0.7, inherit.aes = FALSE) +
+  geom_vline(xintercept = 0, colour = "grey40", linewidth = 0.4) +
+  geom_line(linewidth = 0.85) +
+  facet_wrap(~K_label, nrow = 1) +
+  scale_colour_manual(values = c("firebrick3", "steelblue3"), name = "Status") +
+  labs(
+    x = expression("Genotypic value  " * G),
+    y = "Density"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom", panel.grid.minor = element_blank())
+```
+
+
+# Prevalence-adjusted genetic information $\Lambda_K$
+
+The low-prevalence genetic information $\Lambda_0 = \sigma^2/2$ does not depend on prevalence.
+A prevalence-adjusted counterpart is
+\begin{equation}
+\Lambda_K = \tfrac{1}{2}\!\left(
+  \E\!\left[\log\frac{f(G\mid\text{case})}{f(G\mid\text{noncase})}\,\Bigg|\,\text{case}\right]
++ \E\!\left[\log\frac{f(G\mid\text{noncase})}{f(G\mid\text{case})}\,\Bigg|\,\text{noncase}\right]
+\right),
+\label{eq:lambda-K-def}
+\end{equation}
+the average of the expected log-likelihood ratio (LLR) favouring case status in cases and
+the expected LLR favouring noncase status in noncases.  From the conditional densities in
+Appendix A.1, the genetic component of the LLR is
+$$
+\log\frac{f(g\mid\text{case})}{f(g\mid\text{noncase})} = \log\frac{1-K}{K} + \log(e^{\gamma e^g}-1),
+$$
+and the prior-odds terms cancel in \eqref{eq:lambda-K-def}, giving
+\begin{equation}
+\Lambda_K = \tfrac{1}{2}\!\left(
+  \E_{G\mid\text{case}}\!\left[\log(e^{\gamma e^G}-1)\right]
+- \E_{G\mid\text{noncase}}\!\left[\log(e^{\gamma e^G}-1)\right]
+\right).
+\label{eq:lambda-K}
+\end{equation}
+In the low-prevalence limit $\gamma\to 0$, $\log(e^{\gamma e^G}-1)\approx \log\gamma + G$,
+and \eqref{eq:lambda-K} reduces to $\tfrac{1}{2}(\E[G|\text{case}]-\E[G|\text{noncase}])\to\sigma^2/2=\Lambda_0$.
+
+
+```{r compute_grids, message=FALSE, warning=FALSE}
+
+library(ggplot2)
+
+# ------------------------------------------------------------------ #
+# Marginal survival  S(gam, sigma2) = E[exp(-gam * exp(G))]          #
+# for G ~ N(0, sigma2), evaluated on a uniform grid                  #
+# ------------------------------------------------------------------ #
+marginal_S <- function(gam, sigma2, n = 400L) {
+  sig <- sqrt(sigma2)
+  g   <- seq(-7 * sig, 7 * sig, length.out = n)
+  sum(exp(-gam * exp(g)) * dnorm(g, 0, sig)) * (g[2] - g[1])
+}
+
+# ------------------------------------------------------------------ #
+# Find gam such that 1 - S(gam, sigma2) = K_target                   #
+# ------------------------------------------------------------------ #
+find_gam <- function(K_target, sigma2) {
+  obj <- function(lg) 1 - marginal_S(exp(lg), sigma2) - K_target
+  exp(uniroot(obj, c(-20, 10), tol = 1e-9)$root)
+}
+
+# ------------------------------------------------------------------ #
+# Sibling RRR (R = 1/2) via 1-D quadrature over shared component U  #
+#   lambda_S = E_U[ K(t;U)^2 ] / K^2                                #
+#   K(t;U)   = 1 - S_{1/2}(gam * exp(U))                            #
+# ------------------------------------------------------------------ #
+compute_lambda_S <- function(sigma2, K_target, n = 250L) {
+  gam <- find_gam(K_target, sigma2)
+  sU  <- sqrt(0.5 * sigma2)
+  sV  <- sqrt(0.5 * sigma2)
+  u   <- seq(-7 * sU, 7 * sU, length.out = n)
+  v   <- seq(-7 * sV, 7 * sV, length.out = n)
+  du  <- u[2] - u[1];  dv <- v[2] - v[1]
+  surv_mat  <- exp(-outer(gam * exp(u), exp(v)))
+  S_given_U <- as.vector(surv_mat %*% (dnorm(v, 0, sV) * dv))
+  K_given_U <- 1 - S_given_U
+  sum(K_given_U^2 * dnorm(u, 0, sU)) * du / K_target^2
+}
+
+# ------------------------------------------------------------------ #
+# Lambda_K: half the difference of expected log(e^{gam*e^G}-1)       #
+# between cases and noncases                                          #
+# ------------------------------------------------------------------ #
+compute_Lambda_K <- function(sigma2, K_target, n = 400L) {
+  gam <- find_gam(K_target, sigma2)
+  sig <- sqrt(sigma2)
+  g   <- seq(-7 * sig, 7 * sig, length.out = n)
+  dg  <- g[2] - g[1]
+  H   <- gam * exp(g)
+  # log(e^H - 1): stable for all H > 0
+  h_g <- ifelse(H > 500, H, log(expm1(H)))
+  S_g <- exp(-H)          # P(noncase | G = g)
+  K_g <- 1 - S_g          # P(case    | G = g)
+  phi <- dnorm(g, 0, sig)
+  E_case    <- sum(h_g * K_g * phi) * dg / K_target
+  E_noncase <- sum(h_g * S_g * phi) * dg / (1 - K_target)
+  (E_case - E_noncase) / 2
+}
+
+# ------------------------------------------------------------------ #
+# Compute grid                                                        #
+# ------------------------------------------------------------------ #
+info_vals <- seq(0.05, 1.50, by = 0.10)   # Lambda_0 = sigma^2/2
+K_vals    <- c(0.01, 0.05, 0.10)
+K_labels  <- paste0("K = ", K_vals)
+
+grid <- expand.grid(info = info_vals, K = K_vals)
+grid$lambda_S  <- mapply(function(i, K) compute_lambda_S(2*i, K), grid$info, grid$K)
+grid$Lambda_K  <- mapply(function(i, K) compute_Lambda_K(2*i, K),  grid$info, grid$K)
+grid$K_label   <- factor(paste0("K = ", grid$K),
+                          levels = c(K_labels, "Low-prev. limit (K -> 0)"))
+
+limit_df <- data.frame(
+  info     = info_vals,
+  lambda_S = exp(info_vals),
+  K_label  = factor("Low-prev. limit (K -> 0)",
+                    levels = c(K_labels, "Low-prev. limit (K -> 0)"))
+)
+```
+
+
+```{r fig2_LambdaK, message=FALSE, warning=FALSE, fig.cap="Prevalence-adjusted genetic information $\\Lambda_K$ (equation~\\eqref{eq:lambda-K}) vs.\\ low-prevalence genetic information $\\Lambda_0 = \\sigma^2/2$, for three prevalences (solid curves). The dashed diagonal shows the low-prevalence limit $\\Lambda_K = \\Lambda_0$. At finite $K$, $\\Lambda_K < \\Lambda_0$ because disease has become common enough that cases are less sharply selected by genotype.", fig.width=6.5, fig.height=4.5}
+
+# Low-prevalence limit: Lambda_K = Lambda_0 (diagonal)
+limit_LK <- data.frame(info = info_vals, Lambda_K = info_vals,
+                        K_label = factor("Low-prev. limit (K -> 0)",
+                                         levels = c(K_labels, "Low-prev. limit (K -> 0)")))
+
+plot3_df <- rbind(grid[grid$K == 0.10, c("info", "Lambda_K", "K_label")], limit_LK)
+
+ggplot(plot3_df, aes(x = info, y = Lambda_K, colour = K_label, linetype = K_label)) +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = c("firebrick3", "black"), name = "Prevalence") +
+  scale_linetype_manual(values = c("solid", "dashed"),   name = "Prevalence") +
+  labs(
+    x = expression(Lambda[0] == sigma^2 / 2 ~ " (nats)"),
+    y = expression(Lambda[K] ~ " (nats)")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+```
+
+---
+
+# The liability-threshold model and the heritability of liability
+The approach most widely used in quantitative genetics to quantify the genetic effects on  binary trait is to estimate the "heritability".  The liability-threshold model (Falconer 1965) postulates a latent liability
+$X_i = G_{L,i} + E_i$, where the genetic component $G_{L,i} \sim \N(0, h^2)$,
+the environmental component $E_i \sim \N(0, 1-h^2)$, and $X_i \sim \N(0,1)$.
+Disease occurs when liability exceeds a threshold $\tau = \Phi^{-1}(1-K)$, where $\Phi$
+is the standard normal CDF and $K$ is the disease prevalence.  The parameter $h^2$ is
+the **heritability of liability**, interpretable as the proportion of liability variance
+attributable to genetics.
+
+The GCTA program (Yang et al.\ 2010) estimates $h^2$ from a genetic relationship matrix by equating
+observed covariances between disease indicators to the predicted covariances based on a
+liability-threshold model.  Converting the estimated genetic variance from the observed binary
+scale to heritability of liability uses a result first derived by
+[Robertson (1949)](http://www.genetics.org/content/genetics/35/2/212.full.pdf).
+
+## Robertson's linearization and the GCTA estimator
+
+Robertson's (1949) result follows from linearizing the nonlinear mapping from latent liability
+to disease indicator.  If $Y_i = \mathbf{1}[X_i > \tau]$ where $X_i \sim \N(0,1)$ is the
+standardized liability and $\tau = \Phi^{-1}(1-K)$ is the threshold, then the regression
+slope of $Y_i$ on any predictor that shifts the mean of $X_i$ by one unit equals
+$\phi(\tau)$, the standard normal density at the threshold:
+$$
+\frac{\partial}{\partial\mu}\Pr(X > \tau \mid \mu)\bigg|_{\mu=0} = \phi(\tau).
+$$
+Squaring this slope gives the scaling of covariances between pairs of individuals.  For
+bivariate normal liabilities $(X_i, X_j)$ with covariance $c = \operatorname{Cov}(X_i,X_j)$,
+Price's theorem gives
+$$
+\frac{\partial\operatorname{Cov}(Y_i, Y_j)}{\partial c}\bigg|_{c=0}
+\;=\; \phi(\tau)^2,
+$$
+because the mixed partial of $(1-\Phi(\tau - x_i))(1-\Phi(\tau - x_j))$ with respect to
+$x_i$ and $x_j$, evaluated at zero covariance, factorises as $\phi(\tau)\phi(\tau) = \phi(\tau)^2$.
+Thus, to first order in $c$,
+$$
+\operatorname{Cov}(Y_i, Y_j) \;\approx\; c\,\phi(\tau)^2.
+$$
+
+For relatives with coefficient of relationship $R$ and liability heritability $h^2_l$, the
+genetic covariance of their liabilities is $c = Rh^2_l$, so
+$$
+\operatorname{Cov}(Y_i, Y_j) \;\approx\; R\,h^2_l\,\phi(\tau)^2,
+$$
+which is equation~\eqref{eq:cov-LT} below.
+
+GCTA fits a linear mixed model in which the covariance matrix of binary outcomes is modelled
+as $\sigma^2_g \mathbf{A}$, where $\mathbf{A}$ is the genetic relationship matrix (GRM) and
+$\sigma^2_g$ is the genetic variance on the observed 0/1 scale, estimated by restricted
+maximum likelihood (REML).  Equating this to the Robertson prediction
+$\sigma^2_g = h^2_l\,\phi(\tau)^2$ gives
+
+$$
+h^2_{\mathrm{liability}} \;=\; \frac{\sigma^2_g}{\phi(\tau)^2}
+\;=\; h^2_{\mathrm{binary}}\,\frac{K(1-K)}{\phi(\tau)^2},
+$$
+
+where $h^2_{\mathrm{binary}} = \sigma^2_g / K(1-K)$ is the genetic variance on the binary
+scale expressed as a fraction of the Bernoulli variance $K(1-K)$.  A more complicated
+formula is required for case-control studies in which cases have been oversampled.
+
+
+## Transforming variance from arithmetic scale to probit scale
+The logistic polygenic model, like the liability-threshold model, can be written as a latent variable model.  In the standard liability-threshold model, the error has a gaussian distribution with zero mean and variance fixed (conventionally) at 1.  In the logistic regression model, the error has a logistic distribution, which is more heavy-tailed than the gaussian distribution.
+
+The logistic distribution has a variance of $\pi^2 / 3$, so an approximation to the genetic variance in a logistic model can be calculated from the genetic variance in a probit model by multiplying by $\pi^2 / 3$.
+
+
+## Covariance of disease indicators under the two models
+
+**Proportional hazards model (truth).**
+From equation~\eqref{eq:deriv-R0}, for individuals $i$ and $j$ with relationship coefficient $R$:
+\begin{equation}
+\operatorname{Cov}(Y_i, Y_j)
+\;\approx\; R\,\sigma^2\!\left(\frac{dK}{d\beta_0}\right)^{\!2}
+\qquad (R \to 0),
+\label{eq:cov-PH}
+\end{equation}
+where $dK/d\beta_0 = \E[H e^{-H}]$ with $H = \gamma e^G$ and $G \sim \N(0,\sigma^2)$.
+
+**Liability-threshold model (assumed by GCTA).**
+For $(G_{L,i}, G_{L,j})$ bivariate normal with covariance $Rh^2$, applying Price's theorem
+to the bivariate normal survivor function $\Pr(X_i > \tau,\, X_j > \tau;\, Rh^2)$ gives:
+\begin{equation}
+\operatorname{Cov}(Y_i, Y_j)
+\;\approx\; R\,h^2\,\varphi(\tau)^2
+\qquad (Rh^2 \to 0),
+\label{eq:cov-LT}
+\end{equation}
+where $\varphi(\tau) = \phi(\tau)$ is the standard normal density at the threshold.
+
+
+---
+
+# Recurrence Risk Ratio for Relatives
+
+## Bivariate genotypic values
+
+For a proband (individual 1) and a relative (individual 2) with **relationship coefficient**
+$R = \operatorname{Cov}(G_1, G_2)/\sigma^2$, the joint genotypic values are bivariate normal:
+$$
+(G_1, G_2) \;\sim\; \N_2\!\left(\mathbf{0},\; \sigma^2 \begin{pmatrix} 1 & R \\ R & 1 \end{pmatrix}\right).
+$$
+For example, $R = 1/2$ for first-degree relatives (parent--offspring or full siblings),
+$R = 1/4$ for second-degree relatives, and $R = 1$ for identical twins.
+
+## Definition of the recurrence risk ratio
+
+The **recurrence risk ratio** for relationship class $R$ is
+\begin{equation}
+\lambda_R(t) = \frac{\Pr(\text{relative is case by }t \mid \text{proband is case by }t)}{K(t)}
+= \frac{\Pr(\text{both are cases by }t)}{K(t)^2}.
+\label{eq:rrr-def}
+\end{equation}
+
+## Decomposition into shared and private components
+
+Decompose the genotypic values as
+$$
+G_i = U + V_i, \qquad
+U \sim \N(0, R\sigma^2), \quad
+V_i \overset{\mathrm{iid}}{\sim} \N(0, (1-R)\sigma^2),
+$$
+with $U, V_1, V_2$ mutually independent.  One can verify that
+$\operatorname{Var}(G_i) = R\sigma^2 + (1-R)\sigma^2 = \sigma^2$ and
+$\operatorname{Cov}(G_1,G_2) = R\sigma^2$, as required.
+
+**Conditional independence.** Given the shared component $U$, the individual hazards
+$h(t \mid G_i) = e^{\beta_0 + U + V_i}$ depend on independent private components $V_1, V_2$.
+Therefore, conditional on $U$, the disease times $T_1$ and $T_2$ are independent.
+
+## Conditional case probability given $U$
+
+Define the **conditional case probability** given $U$:
+\begin{equation}
+K(t; U) \;=\; \Pr(\text{disease by }t \mid U)
+\;=\; 1 - S_{1-R}\!\left(\gamma e^U\right),
+\label{eq:cond-prob}
+\end{equation}
+where
+$$
+S_{1-R}(\lambda) \;=\; \E_{V \sim \N(0,\,(1-R)\sigma^2)}\!\left[e^{-\lambda e^V}\right]
+$$
+is the marginal survival probability for frailty variance $(1-R)\sigma^2$ and cumulative
+baseline hazard $\lambda$.  The marginal case probability satisfies
+$K(t) = \E_U[K(t;U)]$, since $U + V \sim \N(0,\sigma^2)$ marginally.
+
+## The recurrence risk ratio as a ratio of moments
+
+Since $T_1$ and $T_2$ are conditionally independent given $U$,
+$$
+\Pr(\text{both cases} \mid U) = K(t;U)^2.
+$$
+Taking the expectation over $U \sim \N(0, R\sigma^2)$:
+$$
+\Pr(\text{both cases}) = \E_U\!\left[K(t;U)^2\right].
+$$
+Therefore
+\begin{equation}
+\boxed{
+\lambda_R(t) = \frac{\E_U\!\left[K(t;U)^2\right]}{K(t)^2}
+= 1 + \frac{\operatorname{Var}_U\!\left[K(t;U)\right]}{K(t)^2}.
+}
+\label{eq:rrr-moments}
+\end{equation}
+The recurrence risk ratio equals one plus the squared coefficient of variation of the
+conditional case probability over the shared genetic component $U$.  Because
+$\operatorname{Var}[K(t;U)] \geq 0$, we have $\lambda_R \geq 1$, with equality if and only
+if $R = 0$ (unrelated individuals) or $\sigma^2 = 0$ (no genetic variation).
+
+## Bivariate survival representation
+
+Expanding the square in $\E_U[K(t;U)^2]$ and using
+$\E_U[S_{1-R}(\gamma e^U)] = S(t)$ gives
+\begin{equation}
+\lambda_R K^2 = 1 - 2S(t) + J(R),
+\label{eq:biv-surv}
+\end{equation}
+where
+\begin{equation}
+J(R) \;=\; \E_U\!\left[S_{1-R}(\gamma e^U)^2\right]
+\;=\; \E_{G_1, G_2}\!\left[e^{-\gamma(e^{G_1}+e^{G_2})}\right],
+\label{eq:J}
+\end{equation}
+with $(G_1,G_2)$ bivariate normal with correlation $R$ and marginal variance $\sigma^2$.
+The last equality follows by writing
+$S_{1-R}(\gamma e^U)^2 = \E_{V_1,V_2}[e^{-\gamma(e^{U+V_1}+e^{U+V_2})}]$ and
+integrating over $U$.  Since $S = 1 - K$, equation~\eqref{eq:biv-surv} rearranges to
+\begin{equation}
+J(R) = 1 - 2K + \lambda_R K^2,
+\label{eq:J-alt}
+\end{equation}
+which by inclusion--exclusion equals $\Pr(\text{both relatives are noncases by }t)$.
+
+## Derivative with respect to $R$ via Price's theorem
+
+**Price's theorem** states that for $(G_1, G_2)$ bivariate normal with
+$\operatorname{Cov}(G_1,G_2) = c = R\sigma^2$, and any smooth $f$,
+\begin{equation}
+\frac{\partial}{\partial c}\,\E[f(G_1,G_2)] = \E\!\left[\frac{\partial^2 f}{\partial G_1\,\partial G_2}\right].
+\label{eq:price}
+\end{equation}
+Apply~\eqref{eq:price} to $f(G_1,G_2) = (1-e^{-\gamma e^{G_1}})(1-e^{-\gamma e^{G_2}})$.  The
+mixed partial is
+$$
+\frac{\partial^2 f}{\partial G_1\,\partial G_2}
+= \gamma e^{G_1} e^{-\gamma e^{G_1}} \cdot \gamma e^{G_2} e^{-\gamma e^{G_2}}
+= H_1 e^{-H_1} \cdot H_2 e^{-H_2},
+$$
+where $H_i = \gamma e^{G_i}$ is the individual cumulative hazard.  Therefore
+\begin{equation}
+\frac{d}{dR}\,\Pr(\text{both cases}) = \sigma^2\,\E\!\left[H_1 e^{-H_1}\,H_2 e^{-H_2}\right].
+\label{eq:deriv-cases}
+\end{equation}
+
+At $R = 0$, $G_1$ and $G_2$ are independent, so the expectation factorises:
+\begin{equation}
+\left.\frac{d}{dR}\,\Pr(\text{both cases})\right|_{R=0}
+= \sigma^2\,\E\!\left[He^{-H}\right]^2
+= \sigma^2\!\left(\frac{dK}{d\beta_0}\right)^{\!2}.
+\label{eq:deriv-R0}
+\end{equation}
+
+Since $\lambda_R|_{R=0} = 1$ and $d\lambda_R/dR = K^{-2}\,d\Pr(\text{both cases})/dR$,
+using~\eqref{eq:mean-case} to write $dK/d\beta_0 = K\,\E[G\mid\text{case}]/\sigma^2$:
+\begin{equation}
+\left.\frac{d\lambda_R}{dR}\right|_{R=0}
+= \frac{\sigma^2}{K^2}\!\left(\frac{dK}{d\beta_0}\right)^{\!2}
+= \frac{\bigl(\E[G\mid\text{case}]\bigr)^2}{\sigma^2}.
+\label{eq:slope-rrr}
+\end{equation}
+The initial slope of $\lambda_R$ in $R$ is the squared mean genotypic value of cases,
+scaled by $\sigma^{-2}$.
+
+## Low-prevalence limit: $\log\lambda_R \to R\sigma^2$
+
+When $\gamma \to 0$ (equivalently $K \to 0$), the cumulative hazard $H = \gamma e^G$ is
+small, and we may linearise $1 - e^{-H} \approx H$:
+$$
+K(t; U) \approx \gamma e^{(1-R)\sigma^2/2}\,e^U,
+$$
+using $\E_{V\sim\N(0,(1-R)\sigma^2)}[e^V] = e^{(1-R)\sigma^2/2}$.
+
+The marginal prevalence is
+$$
+K(t) \approx \gamma\,e^{(1-R)\sigma^2/2}\,\E\!\left[e^U\right]
+= \gamma\,e^{(1-R)\sigma^2/2}\,e^{R\sigma^2/2} = \gamma\,e^{\sigma^2/2},
+$$
+as before.  The second moment of $K(t;U)$ is
+$$
+\E_U\!\left[K(t;U)^2\right]
+\approx \gamma^2\,e^{(1-R)\sigma^2}\,\E\!\left[e^{2U}\right]
+= \gamma^2\,e^{(1-R)\sigma^2}\,e^{2R\sigma^2}
+= \gamma^2\,e^{(1+R)\sigma^2},
+$$
+using the MGF of $U \sim \N(0,R\sigma^2)$: $\E[e^{2U}] = e^{2R\sigma^2}$.
+Therefore
+\begin{equation}
+\lambda_R \approx \frac{\gamma^2\,e^{(1+R)\sigma^2}}{\gamma^2\,e^{\sigma^2}} = e^{R\sigma^2},
+\label{eq:lambda-approx}
+\end{equation}
+so
+\begin{equation}
+\boxed{\log\lambda_R \;\approx\; R\sigma^2 \qquad (K \to 0).}
+\label{eq:log-lambda}
+\end{equation}
+
+**Connection to genetic information.**  The expected log-likelihood ratio for discrimination
+(in nats) is $\Lambda_0 = \sigma^2/2$.  The recurrence risk ratio for a relative
+with relationship coefficient $R$ satisfies, in the low-prevalence limit,
+\begin{equation}
+\log\lambda_R = 2R\,\Lambda_0.
+\label{eq:lambda-info}
+\end{equation}
+In particular, for full siblings ($R = 1/2$): $\log\lambda_S = \Lambda_0$,
+i.e.\ $\lambda_S = e^{\Lambda_0}$.  For identical twins ($R = 1$):
+$\log\lambda_1 = 2\Lambda_0 = \sigma^2$.
+
+## Summary of recurrence risk ratio results
+
+| Quantity | Expression |
+|---|---|
+| General formula | $\lambda_R = \E_U[K(t;U)^2] / K(t)^2$ |
+| Variance form | $\lambda_R = 1 + \operatorname{Var}[K(t;U)]/K(t)^2$ |
+| Bivariate survival | $\lambda_R K^2 = 1 - 2S(t) + \E[e^{-\gamma(e^{G_1}+e^{G_2})}]$ |
+| Slope at $R=0$ | $d\lambda_R/dR|_{R=0} = (\E[G|\text{case}])^2/\sigma^2$ |
+| Low-prevalence limit | $\log\lambda_R \approx R\sigma^2 = 2R\,\Lambda_0$ |
+| Siblings ($R=1/2$) | $\log\lambda_S \approx \sigma^2/2 = \Lambda_0$ |
+
+Here $U \sim \N(0, R\sigma^2)$, $K(t;U) = 1 - S_{1-R}(\gamma e^U)$, and
+$S_{1-R}(\lambda) = \E_{N(0,(1-R)\sigma^2)}[e^{-\lambda e^V}]$.
+The evaluation of $\lambda_R$ at finite $K$ reduces to a one-dimensional numerical
+integral over $U$.
+
+---
+
+# Numerical Illustration: Sibling Recurrence Risk Ratio
+
+**Figure 2** compares the exact $\lambda_S$ against the limit $\lambda_S = e^{\Lambda_0}$ as a
+function of $\Lambda_0 = \sigma^2/2$.
+**Figure 3** replots the same data against the prevalence-adjusted information $\Lambda_K$
+(equation~\eqref{eq:lambda-K}).  For each $(\sigma^2, K)$ pair, $\gamma$ is obtained by solving
+$1 - S(t;\gamma) = K$ numerically, and both $\lambda_S$ and $\Lambda_K$ are evaluated by
+quadrature.
+
+
+```{r fig1_Lambda0, message=FALSE, warning=FALSE, fig.cap="Sibling recurrence risk ratio vs. low-prevalence genetic information $\\Lambda_0 = \\sigma^2/2$. Solid curves: exact values at three prevalences. Dashed line: low-prevalence limit. Log scale on y-axis.", fig.width=6.5, fig.height=4.5}
+
+pal    <- c("steelblue3", "darkorange2", "firebrick3", "black")
+ltypes <- c("solid", "solid", "solid", "dashed")
+bk_y   <- c(1, 1.5, 2, 3, 5, 7, 10, 15)
+
+plot1_df <- rbind(grid[, c("info", "lambda_S", "K_label")],
+                  limit_df[, c("info", "lambda_S", "K_label")])
+
+ggplot(plot1_df, aes(x = info, y = lambda_S, colour = K_label, linetype = K_label)) +
+  geom_line(linewidth = 0.9) +
+  scale_y_log10(breaks = bk_y, labels = as.character(bk_y), minor_breaks = NULL) +
+  scale_colour_manual(values = pal, name = "Prevalence") +
+  scale_linetype_manual(values = ltypes, name = "Prevalence") +
+  labs(
+    x = expression(Lambda[0] == sigma^2 / 2 ~ " (nats)"),
+    y = expression(lambda[S] ~ "(log scale)")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+```
+
+
+## Estimated heritability of liability
+
+Equating~\eqref{eq:cov-PH} and~\eqref{eq:cov-LT} gives the heritability that GCTA would estimate when the true
+model is the proportional hazards model:
+\begin{equation}
+\boxed{h^2 = \sigma^2\,\frac{(dK/d\beta_0)^2}{\varphi(\tau)^2}
+= 2\Lambda_0\,\frac{(dK/d\beta_0)^2}{\varphi(\tau)^2}.}
+\label{eq:h2}
+\end{equation}
+
+Because $h^2$ is a proportion of variance it is constrained to $[0, 1]$; for
+sufficiently large $\Lambda_0$ at any fixed prevalence, equation~\eqref{eq:h2} exceeds 1,
+indicating that the proportional hazards model then predicts familial aggregation
+too strong to be accommodated within the liability-threshold framework.
+
+## Low-prevalence approximation
+
+As $K \to 0$, two simplifications apply.
+First, $H = \gamma e^G \to 0$ so $\E[H e^{-H}] \approx \E[H] = K$.
+Second, by the Mills ratio, $\varphi(\tau) \approx K\tau$ where $\tau = \Phi^{-1}(1-K)$.
+Substituting into~\eqref{eq:h2}:
+\begin{equation}
+h^2 \;\approx\; \frac{\sigma^2 K^2}{K^2\tau^2} = \frac{\sigma^2}{\tau^2} = \frac{2\Lambda_0}{\tau^2}.
+\label{eq:h2-approx}
+\end{equation}
+Since $\tau$ depends on $K$, equation~\eqref{eq:h2-approx} still varies with prevalence.  As $K \to 0$,
+$\tau \sim \sqrt{-2\log K} \to \infty$, so $h^2 \to 0$ for any fixed $\Lambda_0$: the
+liability-threshold model assigns vanishingly small heritability to what is, in the
+proportional hazards model, a fixed and substantial genetic effect.
+
+Figure 4 shows the exact formula~\eqref{eq:h2} for four prevalences.
+
+```{r compute_h2, message=FALSE, warning=FALSE}
+
+# Exact h^2 for given sigma^2 and K_target
+compute_h2 <- function(sigma2, K_target, n = 400L) {
+  gam       <- find_gam(K_target, sigma2)
+  sig       <- sqrt(sigma2)
+  g         <- seq(-7 * sig, 7 * sig, length.out = n)
+  dg        <- g[2] - g[1]
+  H         <- gam * exp(g)
+  dK_dbeta0 <- sum(H * exp(-H) * dnorm(g, 0, sig)) * dg
+  tau       <- qnorm(1 - K_target)
+  phi_tau   <- dnorm(tau)
+  sigma2 * dK_dbeta0^2 / phi_tau^2
+}
+
+info_vals_h2 <- seq(0.05, 1.50, by = 0.05)
+K_vals_h2    <- c(0.001, 0.01, 0.05, 0.10)
+K_labels_h2  <- paste0("K = ", K_vals_h2)
+
+grid_h2 <- expand.grid(info = info_vals_h2, K = K_vals_h2)
+grid_h2$h2_exact <- mapply(
+  function(i, K) compute_h2(2 * i, K), grid_h2$info, grid_h2$K)
+grid_h2$K_label <- factor(paste0("K = ", grid_h2$K), levels = K_labels_h2)
+```
+
+```{r fig_h2, message=FALSE, warning=FALSE, fig.cap="Figure 4. Heritability of liability $h^2$ estimated by the liability-threshold model (GCTA) when the true model is proportional hazards with $\\Lambda_0 = \\sigma^2/2$, for four prevalences (equation~\\eqref{eq:h2}). The dotted horizontal line marks $h^2 = 1$; above this the two models are incompatible.", fig.width=6.5, fig.height=4.5}
+
+pal_h2 <- c("grey50", "steelblue3", "darkorange2", "firebrick3")
+
+ggplot(grid_h2, aes(x = info, y = h2_exact, colour = K_label)) +
+  geom_hline(yintercept = 1, colour = "grey50", linewidth = 0.4,
+             linetype = "dotted") +
+  geom_line(linewidth = 0.9) +
+  scale_colour_manual(values = pal_h2, name = "Prevalence") +
+  coord_cartesian(ylim = c(0, 1.05)) +
+  labs(
+    x = expression(Lambda[0] == sigma^2/2 ~ "(nats)"),
+    y = expression(h^2 ~ "(heritability of liability)")
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "right", panel.grid.minor = element_blank())
+```
+
+
+
+To estimate genetic variance on a logistic scale from genetic relationship matrices, we have to fit a logistic mixed model with a large covariance matrix.  Methods for this have recently become available: they include the programs [GMMAT](https://www.ncbi.nlm.nih.gov/pubmed/27018471) and [SAIGE program](https://www.biorxiv.org/content/early/2017/11/01/212357)
+
+# Practical implications
+For most complex diseases, genetic effects are not large enough for genotypic prediction on its own to be a good predictor, though genotypic prediction may be useful for identifying rare subtypes and as an adjunct to clinical predictors.  For instance estimates of the sibling recurrence risk ratio for coronary heart disease are in the range 2 to 3, equivalent to expected information for discrimination of about 1.5 bits.  This is the predictive performance of an optimal model: a realistic model would not come near this.  For comparison, a good predictor, based on clinical data and biomarkers would be considered to be one with at least 3 bits of information for discrimination.
+
+---
+
+\appendix
+
+# Appendix
+
+## Conditional Densities of $G$
+
+Let $\varphi_\sigma(g) = (2\pi\sigma^2)^{-1/2}\exp(-g^2/2\sigma^2)$ denote the $\N(0,\sigma^2)$ density.
+An individual is a **case** if disease occurs before time $t$, i.e.\ $T \le t$, and a **noncase** if $T > t$.
+
+By Bayes' theorem, conditioning on the observed outcome at time $t$:
+$$
+\boxed{f_{G \mid \text{noncase}}(g) = \frac{e^{-\gamma e^g}\,\varphi_\sigma(g)}{S(t)}},
+\qquad
+\boxed{f_{G \mid \text{case}}(g) = \frac{\bigl(1 - e^{-\gamma e^g}\bigr)\,\varphi_\sigma(g)}{K(t)}}.
+$$
+
+The weighting functions $e^{-\gamma e^g}$ and $1 - e^{-\gamma e^g}$ are not of the form $e^{\theta g}$,
+so neither conditional distribution is Gaussian in general.  We use moment generating
+functions (MGFs) to characterise them.
+
+---
+
+## Moment generating functions and cumulant generating functions
+### MGF of $G$ and exponential tilting
+
+For $G \sim \N(0,\sigma^2)$ the MGF is
+$$
+\mathcal{M}_G(\theta) = \E\!\left[e^{\theta G}\right] = e^{\theta^2\sigma^2/2}.
+$$
+Completing the square in the exponent,
+$$
+e^{\theta g}\,\varphi_\sigma(g) = e^{\theta^2\sigma^2/2}\,\varphi_\sigma(g - \theta\sigma^2),
+$$
+where $\varphi_\sigma(g - \theta\sigma^2)$ is the $\N(\theta\sigma^2,\sigma^2)$ density.  Hence for
+any measurable function $h$,
+\begin{equation}
+\E_G\!\left[e^{\theta G} h(G)\right] = e^{\theta^2\sigma^2/2}\,\E_{G'}\!\left[h(G')\right],
+\quad G' \sim \N(\theta\sigma^2, \sigma^2).
+\label{eq:tilting}
+\end{equation}
+This is the **exponential tilting** identity: multiplying the integrand by $e^{\theta G}$ shifts
+the Gaussian mean by $\theta\sigma^2$.
+
+### Tilted survival probability
+
+Apply~\eqref{eq:tilting} with $h(G) = \exp(-\gamma e^G)$:
+$$
+\E_G\!\left[e^{\theta G} e^{-\gamma e^G}\right]
+= e^{\theta^2\sigma^2/2}\,\E_{N(\theta\sigma^2,\sigma^2)}\!\left[e^{-\gamma e^G}\right].
+$$
+Write the expectation on the right-hand side in terms of a standard Gaussian $Z \sim \N(0,\sigma^2)$:
+$$
+\E_{N(\theta\sigma^2,\sigma^2)}\!\left[e^{-\gamma e^G}\right]
+= \E_Z\!\left[e^{-\gamma e^{\theta\sigma^2 + Z}}\right]
+= \E_Z\!\left[e^{-\gamma_\theta e^Z}\right]
+= S(t;\, \gamma_\theta),
+$$
+where $\gamma_\theta = \gamma e^{\theta\sigma^2}$ and
+$$
+S(t;\, \gamma') = \E_{Z \sim \N(0,\sigma^2)}\!\left[e^{-\gamma' e^Z}\right]
+$$
+is the marginal survival probability when the cumulative baseline hazard is $\gamma'$.
+Equivalently, $S(t;\,\gamma_\theta) = S(t;\,\gamma e^{\theta\sigma^2})$ is the marginal survival
+for an individual whose log-hazard intercept is $\beta_0 + \theta\sigma^2$ rather than $\beta_0$.
+
+Thus:
+\begin{equation}
+\E_G\!\left[e^{\theta G} e^{-\gamma e^G}\right] = e^{\theta^2\sigma^2/2}\, S(t;\,\gamma_\theta).
+\label{eq:tilted-survival}
+\end{equation}
+
+### MGF of $G \mid \text{noncase}$
+
+\begin{equation}
+\mathcal{M}_{G\mid\text{noncase}}(\theta)
+= \frac{\E\!\left[e^{\theta G} e^{-\gamma e^G}\right]}{S(t;\,\gamma)}
+= \frac{e^{\theta^2\sigma^2/2}\, S(t;\, \gamma e^{\theta\sigma^2})}{S(t;\,\gamma)}.
+\label{eq:mgf-noncase}
+\end{equation}
+
+### MGF of $G \mid \text{case}$
+
+Since $\E[e^{\theta G}(1 - e^{-\gamma e^G})] = \mathcal{M}_G(\theta) - \E[e^{\theta G}e^{-\gamma e^G}]$,
+using~\eqref{eq:tilted-survival} and writing $K(t;\,\gamma') = 1 - S(t;\,\gamma')$:
+\begin{equation}
+\mathcal{M}_{G\mid\text{case}}(\theta)
+= \frac{e^{\theta^2\sigma^2/2}\bigl(1 - S(t;\,\gamma e^{\theta\sigma^2})\bigr)}{K(t;\,\gamma)}
+= \frac{e^{\theta^2\sigma^2/2}\, K(t;\, \gamma e^{\theta\sigma^2})}{K(t;\,\gamma)}.
+\label{eq:mgf-case}
+\end{equation}
+
+**Interpretation.** Both MGFs factor as $e^{\theta^2\sigma^2/2}$ (the base Gaussian MGF)
+times a ratio of prevalences under a tilted prior.  
+
+Taking logarithms of the MGFs yields the cumulant generating functions (CGFs):
+\begin{equation}
+\psi_{G\mid\text{noncase}}(\theta) = \frac{\theta^2\sigma^2}{2}
+  + \log S(t;\,\gamma e^{\theta\sigma^2}) - \log S(t;\,\gamma),
+\label{eq:cgf-noncase}
+\end{equation}
+\begin{equation}
+\psi_{G\mid\text{case}}(\theta) = \frac{\theta^2\sigma^2}{2}
+  + \log K(t;\,\gamma e^{\theta\sigma^2}) - \log K(t;\,\gamma).
+\label{eq:cgf-case}
+\end{equation}
+
+A distribution is Gaussian if and only if its CGF is exactly quadratic in $\theta$.  The
+additional terms $\log S(t;\,\gamma e^{\theta\sigma^2})$ and $\log K(t;\,\gamma e^{\theta\sigma^2})$ are not quadratic in $\theta$, confirming that neither conditional distribution is Gaussian.
+
+---
+
+---
+
+## Moments via Stein's Lemma
+
+### Stein's lemma
+
+For $G \sim \N(0,\sigma^2)$ and any differentiable function $h$ with
+$\E|h'(G)| < \infty$,
+\begin{equation}
+\E[G\, h(G)] = \sigma^2\, \E[h'(G)].
+\label{eq:stein}
+\end{equation}
+
+### A key expectation
+
+Set $h(g) = e^{-\gamma e^g}$.  Then $h'(g) = -\gamma e^g e^{-\gamma e^g}$.
+Applying~\eqref{eq:stein}:
+\begin{equation}
+\E\!\left[G\, e^{-\gamma e^G}\right] = -\sigma^2\,\gamma\,\E\!\left[e^G e^{-\gamma e^G}\right]
+= -\sigma^2\, \E\!\left[H(t,G)\, e^{-H(t,G)}\right],
+\label{eq:key-exp}
+\end{equation}
+where $H(t,G) = \gamma e^G$ is the random cumulative hazard.
+
+### Derivative of prevalence with respect to $\beta_0$
+
+\begin{equation}
+\frac{dK}{d\beta_0}
+= \frac{d}{d\beta_0}\!\left(1 - \E\!\left[e^{-t e^{\beta_0 + G}}\right]\right)
+= \E\!\left[t e^{\beta_0 + G} e^{-t e^{\beta_0 + G}}\right]
+= \E\!\left[H(t,G)\, e^{-H(t,G)}\right].
+\label{eq:dK-dbeta}
+\end{equation}
+
+Combining~\eqref{eq:key-exp} and~\eqref{eq:dK-dbeta}:
+\begin{equation}
+\E\!\left[G\, e^{-\gamma e^G}\right] = -\sigma^2\,\frac{dK}{d\beta_0}.
+\label{eq:G-survival}
+\end{equation}
+
+### Mean genotypic values
+
+Since $\E[G] = 0$, the law of total expectation gives
+$K\,\E[G\mid\text{case}] + (1-K)\,\E[G\mid\text{noncase}] = 0$.
+
+**Noncases:**
+\begin{equation}
+\E[G \mid \text{noncase}]
+= \frac{\E\!\left[G\,e^{-\gamma e^G}\right]}{S(t)}
+= \frac{-\sigma^2\,dK/d\beta_0}{1 - K}
+= \sigma^2\,\frac{d\log(1-K)}{d\beta_0}.
+\label{eq:mean-noncase}
+\end{equation}
+
+**Cases:**
+\begin{equation}
+\E[G \mid \text{case}]
+= \frac{-\E\!\left[G\,e^{-\gamma e^G}\right]}{K}
+= \frac{\sigma^2\,dK/d\beta_0}{K}
+= \sigma^2\,\frac{d\log K}{d\beta_0}.
+\label{eq:mean-case}
+\end{equation}
+
+The mean genotypic value in cases equals $\sigma^2$ times the logarithmic sensitivity
+of prevalence to the log-hazard intercept $\beta_0$.  Because $K$ is an increasing
+function of $\beta_0$, $\E[G\mid\text{case}] > 0$ and $\E[G\mid\text{noncase}] < 0$,
+as expected.
+
+---
+
+
+## Limit low prevalence ($\gamma \to 0$)
+
+When $\gamma \to 0$, $H(t,G) = \gamma e^G \to 0$ and $1 - e^{-\gamma e^G} \approx \gamma e^G$.
+The conditional case density becomes
+$$
+f_{G\mid\text{case}}(g)
+\;\propto\; \gamma e^g\,\varphi_\sigma(g)
+\;\propto\; \exp\!\left(g - \frac{g^2}{2\sigma^2}\right)
+= \exp\!\left(-\frac{(g - \sigma^2)^2}{2\sigma^2}\right).
+$$
+Hence, **in the limit of low prevalence**:
+\begin{equation}
+G \mid \text{case} \;\xrightarrow{\gamma\to 0}\; \N(\sigma^2,\,\sigma^2).
+\label{eq:low-prev}
+\end{equation}
+This is consistent with equation~\eqref{eq:mean-case}: for small $K \approx \gamma e^{\sigma^2/2}$,
+we have $dK/d\beta_0 \approx K$, so $\E[G\mid\text{case}] \approx \sigma^2$.
+
+Noncases remain approximately $\N(0,\sigma^2)$ since most individuals are noncases.
+

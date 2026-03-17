@@ -8,28 +8,26 @@ The key quantity being estimated is Λ (lambda) — the expected log-likelihood 
 
 All models share the structure: observed binary outcome y is Bernoulli with logits = β₀ + G, where G = L @ Z incorporates genetic correlation via the Cholesky factor L of the genetic relationship matrix.
 
-- **`logistic_mvnorm`** — Gaussian random effects: z ~ Normal(0,1), G = s (L @ z). This model would be appropriate where sampling is based on a total population, rather than a case-control sample. 
+- **`logistic_mvnorm`** — Gaussian random effects: z ~ Normal(0,1), G = s (L @ z). This model would be appropriate where sampling is based on a total population, rather than a case-control sample.
 - **`logistic_mix2_mvnorm`** — Two-component mixture random effects using `MixtureSameFamily`, with the constraint μ = 0.5 s².
 - **`lr_discrete`** — Same mixture model with explicit discrete latent class indicators, for use with `DiscreteHMCGibbs`.
 - **`lr_discrete_blockdiag`** — Block-diagonal variant of `lr_discrete` that operates on batched per-family Cholesky factors after removing singletons, for efficient MCMC on large samples.
 
-## Quick start
+---
 
-### Requirements
+## Sampling algorithm 1: DiscreteHMCGibbs (NumPyro / JAX)
 
-- JAX (with GPU support recommended)
-- NumPyro
-- NumPy, SciPy, matplotlib
+### Overview
 
-Multi-GPU systems can run chains in parallel via `chain_method="parallel"`.
+The `lr_discrete_blockdiag` model is fitted with NumPyro's `DiscreteHMCGibbs` (modified=True, NUTS inner kernel). The class indicators r_i ∈ {−1, +1} are discrete latent variables; `DiscreteHMCGibbs` alternates between enumerating over these exactly and running NUTS for the continuous parameters (μ, s, β₀).
+
+**Key preprocessing — reduction to relatives only.**  Unrelated individuals (singletons in the genetic relationship matrix) contribute no information about λ_S and are discarded before fitting. The functions `find_blocks()` and `reduce_to_relatives()` extract connected components, reducing the data from M to M_rel ≪ M.
 
 ### Running the example
 
 ```bash
 python test_discrete_gibbs_large.py
 ```
-
-This simulates a case-control dataset with related individuals, reduces the genetic relationship matrix to relative-only blocks, fits `lr_discrete_blockdiag` with `DiscreteHMCGibbs`, and prints posterior summaries.
 
 #### Simulated dataset
 
@@ -67,8 +65,6 @@ A population of 884,000 individuals is generated containing 400,000 full-sib pai
 
 #### Block-diagonal reduction
 
-Most sampled individuals are singletons (no relatives in the sample) and do not contribute to estimation of genetic parameters. The preprocessing functions `find_blocks()` and `reduce_to_relatives()` identify connected components in the relationship matrix and discard singletons, reducing the problem size dramatically:
-
 ```
 === Block decomposition ===
   Original M:       17926
@@ -78,26 +74,20 @@ Most sampled individuals are singletons (no relatives in the sample) and do not 
   Reduction ratio:  0.024
 ```
 
-The 17,926 x 17,926 relationship matrix is reduced to 214 independent 2 x 2 blocks (428 individuals in relative pairs). The per-block Cholesky factors are stored as a `(214, 2, 2)` array and the matmul is done via `jnp.einsum`, replacing the original O(M²) dense matmul.
+The 17,926 × 17,926 relationship matrix is reduced to 214 independent 2×2 blocks (428 individuals in relative pairs). The per-block Cholesky factors are stored as a `(214, 2, 2)` array and the matmul is done via `jnp.einsum`, replacing the original O(M²) dense matmul.
 
-#### MCMC with DiscreteHMCGibbs
-
-`lr_discrete_blockdiag` is fitted with `DiscreteHMCGibbs` (modified=True, NUTS inner kernel, max_tree_depth=8). Four chains run in parallel on separate GPUs.
-
-![Trace and posterior density of mu](mu_trace_density.png)
-
-#### Posterior summary (4 chains, 2000 warmup + 2000 samples each)
+#### Posterior summary (4 chains, 2000 warmup + 2000 samples)
 
 ```
-                         mean       std    median      5.0%     95.0%     n_eff     r_hat
-                 mu      2.25      1.58      1.75      0.37      4.54    207.30      1.00
-                  p      0.63      0.04      0.63      0.57      0.70    939.44      1.01
-                  s      2.01      0.67      1.87      1.00      3.09    204.63      1.00
+                     mean       std    median      5.0%     95.0%     n_eff     r_hat
+             mu      2.25      1.58      1.75      0.37      4.54    207.30      1.00
+              p      0.63      0.04      0.63      0.57      0.70    939.44      1.01
+              s      2.01      0.67      1.87      1.00      3.09    204.63      1.00
 ```
 
-True values: μ = 1.00, s = 1.41. The true μ is within the 90% credible interval [0.37, 4.54]. Wall time: ~2.5 minutes on 4 x Tesla V100-SXM2-32GB GPUs.
+True values: μ = 1.00, s = 1.41.  The true μ is within the 90% credible interval [0.37, 4.54].  Wall time: ~2.5 minutes on 4 × Tesla V100-SXM2-32GB GPUs.
 
-### Using the module directly
+### Usage
 
 ```python
 import jax
@@ -106,23 +96,18 @@ import jax.numpy as jnp
 import numpyro
 from numpyro.infer import MCMC, NUTS, DiscreteHMCGibbs
 from jax import random
-
 from geneticinfo import (
     simulate_casecontrol_related, print_casecontrol_summary,
     lr_discrete_blockdiag, reduce_to_relatives,
 )
 
-# Simulate data
 y, A, L, info = simulate_casecontrol_related(
     n_fullsib_pairs=400_000, n_halfsib_pairs=40_000, n_unrelated=4000,
 )
-
-# Reduce to relatives only
 y_red, A_red, L_red, kept_idx, block_sizes = reduce_to_relatives(A, y)
 block_size = block_sizes[0]
 n_blocks = len(block_sizes)
 
-# Extract per-block Cholesky factors
 import numpy as np
 L_blocks = np.zeros((n_blocks, block_size, block_size))
 offset = 0
@@ -130,31 +115,113 @@ for i in range(n_blocks):
     L_blocks[i] = L_red[offset:offset + block_size, offset:offset + block_size]
     offset += block_size
 
-# Run MCMC
-num_chains = min(4, jax.device_count())
-numpyro.set_host_device_count(num_chains)
-
+numpyro.set_host_device_count(4)
 inner_kernel = NUTS(lr_discrete_blockdiag, max_tree_depth=8)
 kernel = DiscreteHMCGibbs(inner_kernel, modified=True)
 mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
-            num_chains=num_chains, chain_method="parallel")
+            num_chains=4, chain_method="parallel")
 mcmc.run(random.PRNGKey(0),
          L_blocks=jnp.array(L_blocks), y_flat=jnp.array(y_red, dtype=jnp.float64),
          n_blocks=n_blocks, block_size=block_size, p_obs=float(y.mean()))
 mcmc.print_summary()
 ```
 
+---
+
+## Sampling algorithm 2: Pólya-gamma Gibbs sampler (NumPy / CPU)
+
+### Overview
+
+An alternative Gibbs sampler is implemented in `pg_gibbs_vectorized.py` using the Pólya-gamma (PG) data-augmentation scheme of Polson, Scott and Windle (2013).  Introducing per-individual auxiliary variables ω_i ~ PG(1, |η_i|) renders the logistic likelihood conditionally Gaussian, enabling exact block Gibbs updates for all continuous latents.
+
+Unlike `DiscreteHMCGibbs`, the PG sampler:
+
+- **Operates on the full case-control sample** (M individuals, including singletons), keeping singletons for the β₀ and z updates while excluding them from the μ likelihood.
+- **Collapses z out analytically** when sampling μ: the precision matrix of each family block is diagonalised via an eigenvalue cache, and the slice sampler for θ = log μ evaluates the collapsed log-posterior in O(M_rel) time.
+- **Handles mixed block sizes** (pairs, triplets, …) with vectorised routines grouped by size; singletons are batched in a single NumPy pass.
+- **Runs on CPU** via `multiprocessing.Pool` with fork, with no JAX or GPU dependency.
+
+#### Singleton exclusion from the μ likelihood
+
+The collapsed log-posterior for θ contains terms −¼ M μ − ½ M log(2μ) arising from the z-prior normalisation. For singleton blocks these terms carry no information about λ_S but impose a strong downward pull when M ≫ M_rel. The sampler therefore restricts this sum to blocks of size ≥ 2, using only the M_rel ≪ M related individuals for the μ update.
+
+#### Performance
+
+A key implementation detail: `np.dot` on arrays of length ~14,000 triggered OpenBLAS multi-thread wakeup (~50 ms per call) because the thread pool slept between Gibbs steps. Replacing three `np.dot` calls with element-wise `.sum()` operations (which bypass BLAS) reduced `sample_beta0_z_fast` from 54 ms to 1.1 ms per call, yielding a 38× overall speedup (3.8 → 145 iterations/second for M = 14,736).
+
+### Running the example
+
+```bash
+python run_pg_gibbs_simdata.py
+```
+
+This simulates a large case-control dataset with full-sib pairs, full-sib triplets, and half-sib pairs; plots genotypic-value densities in cases vs controls; builds the block structure; and runs 4 chains in parallel.
+
+#### Simulated dataset (× 2 population)
+
+```
+=== Population ===
+  Total individuals:        1,484,000
+    Full-sib pairs:           400,000
+    Full-sib triplets:        200,000
+    Half-sib pairs:            40,000
+    Unrelated:                  4,000
+
+=== Case-control sample ===
+  Sample size M:          29,496
+    Cases:                14,748
+    Controls:             14,748
+  Related individuals (block size >= 2):  1,120
+  Blocks: 557 pairs + 2 triplets
+```
+
+#### Posterior summary (4 chains, 1000 warmup + 5000 samples, CPU)
+
+```
+     mean     sd  hdi_3%  hdi_97%  mcse_mean  mcse_sd  ess_bulk  ess_tail  r_hat
+mu  0.632  0.219   0.225    1.044      0.007    0.004    1027.0    1916.0    1.0
+```
+
+True value: μ = 1.00.  90% CI: [0.291, 1.006].  Wall time: ~1 min 43 s on CPU (4 cores).
+
+---
+
+## Comparison of algorithms
+
+| Feature | DiscreteHMCGibbs | PG-Gibbs |
+|---|---|---|
+| Framework | NumPyro / JAX | NumPy (pure CPU) |
+| Hardware | GPU (Tesla V100) | CPU (4 cores) |
+| Data used in μ update | M_rel only (singletons discarded) | M_rel only (singletons retained for β₀/z but excluded from μ) |
+| Mixed block sizes | No (same-size blocks only) | Yes (pairs, triplets, … grouped by size) |
+| Discrete latents (r_i) | Exactly enumerated via DiscreteHMCGibbs | Collapsed (integrated out) for μ; sampled by exact enumeration for z update |
+| μ posterior (same true μ = 1.0) | median 1.75, 90% CI [0.37, 4.54] | median 0.62, 90% CI [0.29, 1.01] |
+| ESS (from ~8k–20k samples) | ~207 | ~1027 |
+| Mixing (IAT) | ~20 | ~20 |
+| Wall time | ~2.5 min (GPU, M_rel = 428) | ~1.7 min (CPU, M = 29,496) |
+| Prior on μ | Half-Cauchy(1) | Half-Cauchy(1) |
+
+**Notes on the posterior comparison.**  The two analyses used different simulated datasets and so the posteriors are not directly comparable.  The DiscreteHMCGibbs result used M_rel = 428 relatives from a smaller population (884k individuals, 400k full-sib pairs only); the PG-Gibbs result used M_rel = 1,120 relatives from a larger population (1,484k individuals, including triplets and half-sibs).  The PG-Gibbs posterior is narrower partly because of the larger M_rel and partly because the collapsed μ update mixes better than the joint (μ, s, r) update in DiscreteHMCGibbs.  Both posteriors contain the true value μ = 1.0 within their 90% credible intervals.
+
+---
+
 ## Files
 
 | File | Description |
-|------|-------------|
+|---|---|
 | `geneticinfo.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
-| `test_discrete_gibbs_large.py` | End-to-end example: simulate, reduce, fit with DiscreteHMCGibbs, plot |
+| `pg_gibbs_vectorized.py` | Vectorised PG-Gibbs sampler: grouped block operations, collapsed θ update |
+| `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |
+| `run_pg_gibbs_simdata.py` | PG-Gibbs on `simulate_casecontrol_related()` dataset; plots genotypic densities |
+| `run_pg_gibbs_create_data.py` | PG-Gibbs on `create_data()` small dataset |
+| `test_discrete_gibbs_large.py` | End-to-end DiscreteHMCGibbs: simulate, reduce, fit, plot |
+| `pg_gibbs_report.md` / `.pdf` | Detailed technical report with model description and results |
 
 ## References
 
 - Clayton DG (2009). Prediction and interaction in complex disease genetics: experience in type 1 diabetes. *PLoS Genetics*, 5(7), e1000540.
 - McKeigue PM (2019). Quantifying performance of a diagnostic test as the expected information for discrimination: relation to the C-statistic. *Statistical Methods in Medical Research*, 28(6), 1841–1851.
+- Polson NG, Scott JG, Windle J (2013). Bayesian inference for logistic models using Pólya-gamma latent variables. *Journal of the American Statistical Association*, 108(504), 1339–1349.
 
 ## License
 
