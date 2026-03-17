@@ -210,6 +210,8 @@ DiscreteHMCGibbs      1.156   0.518  [0.580, 2.127]    296    1.020      325 s  
 
 Both 90% credible intervals contain the true value μ = 1.0.
 
+![Prior, posterior and likelihood for both algorithms](comparison_prior_posterior_likelihood.png)
+
 **Interpretation.**  DiscreteHMCGibbs produces a wider posterior centred closer to the true value; its posterior median (1.156) is slightly above the truth.  PG-Gibbs produces a narrower posterior whose median (0.620) is below the truth, though the true value lies at the 95th percentile of the posterior.  Several factors contribute to this difference:
 
 - *Data scope.*  DiscreteHMCGibbs discards the 28,376 singleton individuals entirely and fits only the M_rel = 1,114 relatives.  PG-Gibbs retains all M = 29,496 individuals for the β₀ and z updates (using the singletons to constrain the intercept), while excluding them from the μ likelihood.  The richer information from singletons about β₀ may alter the effective likelihood seen by μ.

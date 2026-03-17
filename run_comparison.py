@@ -180,3 +180,82 @@ print(f"  {'PG-Gibbs':<22}  {np.median(mu_pg):>7.3f}  {mu_pg.std():>6.3f}  "
 print(f"  {'DiscreteHMCGibbs':<22}  {float(np.median(mu_hmc)):>7.3f}  {mu_hmc.std():>6.3f}  "
       f"  [{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]  "
       f"{ess_hmc:>6.0f}  {rhat_hmc:>6.3f}  {t_hmc:>7.1f}s")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PLOTS: prior / posterior / likelihood for each algorithm
+# ═══════════════════════════════════════════════════════════════════════════════
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from scipy.stats import gaussian_kde
+
+PRIOR_SCALE = 1.0   # half-Cauchy scale used by both samplers
+
+def halfcauchy_pdf(x, scale=PRIOR_SCALE):
+    return 2.0 / (np.pi * scale * (1.0 + (x / scale) ** 2))
+
+def make_likelihood(samples):
+    """Estimate likelihood as posterior / prior (importance-weight KDE)."""
+    prior_vals = np.maximum(halfcauchy_pdf(samples), 1e-300)
+    w = 1.0 / prior_vals
+    w /= w.sum()
+    kde = gaussian_kde(samples, weights=w)
+    return kde
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=False)
+
+for ax, samples, label, wall, m_rel_used, n_samples_str, color_post in [
+    (axes[0], mu_pg,  "PG-Gibbs",
+     t_pg,  f"{M_rel} ({n2} pairs + {n3} triplets)",
+     f"4 chains × 5,000 samples", "steelblue"),
+    (axes[1], mu_hmc, "DiscreteHMCGibbs",
+     t_hmc, f"{2*n2} ({n2} pairs; {n3} triplet(s) excluded)",
+     f"4 chains × 2,000 samples", "darkorange"),
+]:
+    mu_max  = max(4.0, float(np.percentile(samples, 99)) * 1.6)
+    mu_grid = np.linspace(1e-4, mu_max, 600)
+
+    prior_d = halfcauchy_pdf(mu_grid)
+    post_d  = gaussian_kde(samples)(mu_grid)
+    lik_d   = make_likelihood(samples)(mu_grid)
+    lik_d  /= np.trapezoid(lik_d, mu_grid)
+
+    ax.plot(mu_grid, prior_d, color="gray",  lw=1.8, ls="--",
+            label=f"Prior  [half-Cauchy(scale={PRIOR_SCALE:.0f})]")
+    ax.plot(mu_grid, post_d,  color=color_post, lw=2.2,
+            label="Posterior")
+    ax.plot(mu_grid, lik_d,   color="firebrick", lw=2.0, ls="-.",
+            label="Likelihood  (posterior / prior)")
+    ax.axvline(MU_TRUE, color="black", ls=":", lw=1.5,
+               label=f"True μ = {MU_TRUE:.1f}")
+
+    med = float(np.median(samples))
+    ci5, ci95 = float(np.percentile(samples, 5)), float(np.percentile(samples, 95))
+    ess = ess_pg if "PG" in label else ess_hmc
+    rhat = rhat_pg if "PG" in label else rhat_hmc
+
+    ax.set_xlabel("μ  (genetic information, nats)", fontsize=12)
+    ax.set_ylabel("Density", fontsize=12)
+    ax.set_title(
+        f"{label}\n"
+        f"{n_samples_str}   M_rel = {m_rel_used}\n"
+        f"median={med:.3f}   90% CI=[{ci5:.3f}, {ci95:.3f}]",
+        fontsize=10,
+    )
+    ax.text(0.97, 0.95,
+            f"ESS = {ess:.0f}\n$\\hat{{R}}$ = {rhat:.3f}\nwall = {wall:.0f} s",
+            transform=ax.transAxes, ha="right", va="top", fontsize=9,
+            bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85))
+    ax.legend(fontsize=9)
+    ax.set_xlim(0, mu_max)
+    ax.set_ylim(bottom=0)
+
+fig.suptitle(
+    f"Prior, posterior, and likelihood for μ\n"
+    f"Same dataset: M={M:,}   K={K}   true μ={MU_TRUE}   seed={SEED_DATA}",
+    fontsize=11, y=1.01,
+)
+fig.tight_layout()
+fig.savefig("comparison_prior_posterior_likelihood.png", dpi=150, bbox_inches="tight")
+print("\nPlot saved: comparison_prior_posterior_likelihood.png")
