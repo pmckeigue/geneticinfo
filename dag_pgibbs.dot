@@ -1,0 +1,48 @@
+digraph pgibbs {
+    rankdir=TB;
+    graph [fontname="Helvetica", fontsize=13, splines=line, nodesep=0.6, ranksep=0.7];
+    node  [fontname="Helvetica", fontsize=13, margin="0.12,0.08"];
+    edge  [fontname="Helvetica", fontsize=11];
+
+    /* ── Global parameters (shaded circles) ─────────────── */
+    mu    [label="μ",   shape=circle, style=filled, fillcolor="#AED6F1", width=0.8,
+           tooltip="μ ~ HalfCauchy(1)"];
+    beta0 [label="β₀",  shape=circle, style=filled, fillcolor="#AED6F1", width=0.8];
+    p     [label="p",   shape=circle, style=filled, fillcolor="#AED6F1", width=0.8,
+           tooltip="p ~ Beta(a₀, b₀)"];
+
+    /* ── Fixed input (box) ───────────────────────────────── */
+    L     [label="L\n(Cholesky of Φ)", shape=rectangle,
+           style=filled, fillcolor="#FAD7A0"];
+
+    /* ── Per-individual plate ──────────────────────────────
+       Stochastic nodes: circles.
+       Deterministic nodes: double rectangle.
+       Observed node: grey fill.
+    ─────────────────────────────────────────────────────── */
+    subgraph cluster_plate {
+        label="  i = 1, …, M  ";
+        fontsize=12;
+        fontname="Helvetica";
+        style=dashed;
+        color=gray40;
+        margin=18;
+
+        ri   [label="rᵢ ∈ {−1,+1}",  shape=circle, width=1.1];
+        zi   [label="zᵢ",             shape=circle, width=0.8];
+        Gi   [label="Gᵢ = (Lz)ᵢ",    shape=rectangle, peripheries=2];
+        etai [label="ηᵢ = β₀ + Gᵢ",  shape=rectangle, peripheries=2];
+        yi   [label="yᵢ",             shape=circle,
+              style=filled, fillcolor="#A9DFBF", width=0.8];
+    }
+
+    /* ── Edges ───────────────────────────────────────────── */
+    p     -> ri   [label="Bernoulli(p)"];
+    mu    -> zi   [label="N(rᵢμ, 2μ)"];
+    ri    -> zi;
+    zi    -> Gi   [label="  linear"];
+    L     -> Gi;
+    Gi    -> etai;
+    beta0 -> etai;
+    etai  -> yi   [label="Bernoulli(σ(ηᵢ))"];
+}
