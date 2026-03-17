@@ -186,22 +186,54 @@ True value: μ = 1.00.  90% CI: [0.291, 1.006].  Wall time: ~1 min 43 s on CPU (
 
 ---
 
-## Comparison of algorithms
+## Comparison on the same dataset
+
+Both algorithms were run on the same case-control sample (seed = 42) from the population described above (1,484,000 individuals; 400k full-sib pairs, 200k full-sib triplets, 40k half-sib pairs, 4k unrelated; K = 0.01, true μ = 1.0).  The script `run_comparison.py` simulates once and passes the same block structure to both samplers.
+
+**Data summary**
+
+```
+M = 29,496  (14,748 cases, 14,748 controls)
+Related individuals (block size ≥ 2):  1,120
+  Blocks: 557 pairs + 2 triplets
+```
+
+DiscreteHMCGibbs operates on the 557 size-2 blocks (M_rel = 1,114); the 2 size-3 triplet blocks (6 individuals, 0.5% of M_rel) are excluded because `lr_discrete_blockdiag` requires uniform block size.  PG-Gibbs uses all 557 pairs and both triplets.
+
+**Results (true μ = 1.0)**
+
+```
+Algorithm             median     sd     90% CI          ESS    r_hat   wall time
+PG-Gibbs              0.620   0.221  [0.282, 1.010]   1105    1.000      107 s  (CPU, 4 cores)
+DiscreteHMCGibbs      1.156   0.518  [0.580, 2.127]    296    1.020      325 s  (GPU, 4×Tesla V100)
+```
+
+Both 90% credible intervals contain the true value μ = 1.0.
+
+**Interpretation.**  DiscreteHMCGibbs produces a wider posterior centred closer to the true value; its posterior median (1.156) is slightly above the truth.  PG-Gibbs produces a narrower posterior whose median (0.620) is below the truth, though the true value lies at the 95th percentile of the posterior.  Several factors contribute to this difference:
+
+- *Data scope.*  DiscreteHMCGibbs discards the 28,376 singleton individuals entirely and fits only the M_rel = 1,114 relatives.  PG-Gibbs retains all M = 29,496 individuals for the β₀ and z updates (using the singletons to constrain the intercept), while excluding them from the μ likelihood.  The richer information from singletons about β₀ may alter the effective likelihood seen by μ.
+
+- *Mixing.*  The PG-Gibbs IAT ≈ 18 (20,000 samples / ESS 1,105) is much lower than DiscreteHMCGibbs IAT ≈ 27 (8,000 samples / ESS 296), reflecting faster mixing from the collapsed μ update.
+
+- *Posterior concentration.*  With K = 0.01 and 1:1 case-control matching, most relative pairs in the sample are discordant (one case, one control), which carry less information about λ_S than concordant-affected pairs.  The half-Cauchy(1) prior, which has substantial mass at small μ, therefore has considerable influence on both posteriors.
+
+## Algorithm comparison
 
 | Feature | DiscreteHMCGibbs | PG-Gibbs |
 |---|---|---|
 | Framework | NumPyro / JAX | NumPy (pure CPU) |
-| Hardware | GPU (Tesla V100) | CPU (4 cores) |
-| Data used in μ update | M_rel only (singletons discarded) | M_rel only (singletons retained for β₀/z but excluded from μ) |
-| Mixed block sizes | No (same-size blocks only) | Yes (pairs, triplets, … grouped by size) |
-| Discrete latents (r_i) | Exactly enumerated via DiscreteHMCGibbs | Collapsed (integrated out) for μ; sampled by exact enumeration for z update |
-| μ posterior (same true μ = 1.0) | median 1.75, 90% CI [0.37, 4.54] | median 0.62, 90% CI [0.29, 1.01] |
-| ESS (from ~8k–20k samples) | ~207 | ~1027 |
-| Mixing (IAT) | ~20 | ~20 |
-| Wall time | ~2.5 min (GPU, M_rel = 428) | ~1.7 min (CPU, M = 29,496) |
+| Hardware | GPU (4 × Tesla V100) | CPU (4 cores) |
+| Individuals used | M_rel only (singletons discarded) | All M (singletons excluded from μ update only) |
+| Mixed block sizes | No (same-size blocks required) | Yes (pairs, triplets, … grouped by size) |
+| Discrete latents r_i | Gibbs via DiscreteHMCGibbs | Collapsed for μ; exact enumeration for z |
+| Continuous update | NUTS (joint μ, s, β₀) | Slice sampler on θ = log μ; Gaussian draw for β₀, z |
 | Prior on μ | Half-Cauchy(1) | Half-Cauchy(1) |
-
-**Notes on the posterior comparison.**  The two analyses used different simulated datasets and so the posteriors are not directly comparable.  The DiscreteHMCGibbs result used M_rel = 428 relatives from a smaller population (884k individuals, 400k full-sib pairs only); the PG-Gibbs result used M_rel = 1,120 relatives from a larger population (1,484k individuals, including triplets and half-sibs).  The PG-Gibbs posterior is narrower partly because of the larger M_rel and partly because the collapsed μ update mixes better than the joint (μ, s, r) update in DiscreteHMCGibbs.  Both posteriors contain the true value μ = 1.0 within their 90% credible intervals.
+| μ posterior median (true = 1.0) | 1.156 | 0.620 |
+| μ 90% CI | [0.580, 2.127] | [0.282, 1.010] |
+| ESS (bulk) | 296 from 8,000 samples | 1,105 from 20,000 samples |
+| IAT | ~27 | ~18 |
+| Wall time (same dataset) | 325 s | 107 s |
 
 ---
 
@@ -214,6 +246,7 @@ True value: μ = 1.00.  90% CI: [0.291, 1.006].  Wall time: ~1 min 43 s on CPU (
 | `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |
 | `run_pg_gibbs_simdata.py` | PG-Gibbs on `simulate_casecontrol_related()` dataset; plots genotypic densities |
 | `run_pg_gibbs_create_data.py` | PG-Gibbs on `create_data()` small dataset |
+| `run_comparison.py` | Run both algorithms on the same simulated dataset; print side-by-side summary |
 | `test_discrete_gibbs_large.py` | End-to-end DiscreteHMCGibbs: simulate, reduce, fit, plot |
 | `pg_gibbs_report.md` / `.pdf` | Detailed technical report with model description and results |
 

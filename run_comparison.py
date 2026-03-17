@@ -1,0 +1,182 @@
+"""
+Run both DiscreteHMCGibbs and PG-Gibbs on the same case-control dataset
+simulated from a population with full-sib pairs, full-sib triplets, and
+half-sib pairs.  True mu = 1.0, K = 0.01.
+
+DiscreteHMCGibbs (JAX/NumPyro, GPU):
+  - Operates on M_rel individuals in relative-only blocks of size 2
+  - Fits lr_discrete_blockdiag; 4 chains, 2000 warmup + 2000 samples
+
+PG-Gibbs (NumPy, CPU):
+  - Operates on full case-control sample; excludes singletons from mu update
+  - 4 chains via fork, 1000 warmup + 5000 samples
+"""
+import os
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.15"
+
+import time
+import multiprocessing as mp
+import numpy as np
+import arviz as az
+from tqdm import tqdm
+
+# ── simulation parameters ────────────────────────────────────────────────────
+MU_TRUE          = 1.0
+K                = 0.01
+SEED_DATA        = 42
+N_FULLSIB_PAIRS  = 400_000
+N_FULLSIB_TRIPS  = 200_000
+N_HALFSIB_PAIRS  = 40_000
+N_UNRELATED      = 4_000
+
+# ── 1. Simulate once ─────────────────────────────────────────────────────────
+print("=" * 60)
+print("Simulating case-control dataset ...")
+print("=" * 60)
+from geneticinfo import simulate_casecontrol_related, print_casecontrol_summary
+y_sample, A_sample, L_sample, info, g_sample = simulate_casecontrol_related(
+    n_fullsib_pairs=N_FULLSIB_PAIRS,
+    n_fullsib_trips=N_FULLSIB_TRIPS,
+    n_halfsib_pairs=N_HALFSIB_PAIRS,
+    n_unrelated=N_UNRELATED,
+    K=K, mu=MU_TRUE, seed=SEED_DATA,
+    return_genotypic_values=True,
+)
+print_casecontrol_summary(info)
+M = info["M"]
+
+# ── 2. Build shared block structure ──────────────────────────────────────────
+from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
+from pg_gibbs_vectorized import GroupedBlocks, _worker_preloaded
+
+L_np = np.asarray(L_sample, dtype=np.float64)
+y_np = np.asarray(y_sample, dtype=np.float64)
+
+perm_rows, perm_cols, row_slices, col_slices = infer_blocks_from_L(L_np, tol_rel=0.0)
+L_perm = L_np[perm_rows, :][:, perm_cols]
+y_perm = y_np[perm_rows]
+
+bs = BlockStructure(L_perm, col_slices, row_slices)
+gb = GroupedBlocks.from_block_structure(bs)
+sizes_str = "  ".join(f"size-{s}:{gb.L_by_size[s].shape[0]}" for s in gb.sizes)
+print(f"\nBlock structure:  M={gb.M}  blocks={bs.n_blocks}  {sizes_str}")
+
+n2 = gb.L_by_size[2].shape[0] if 2 in gb.L_by_size else 0
+n3 = gb.L_by_size[3].shape[0] if 3 in gb.L_by_size else 0
+M_rel = sum(gb.L_by_size[s].shape[0] * s for s in gb.sizes if s >= 2)
+print(f"  Related (size>=2): {M_rel}  ({n2} pairs, {n3} triplets)")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ALGORITHM 1: PG-Gibbs
+# ═══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup)")
+print("=" * 60)
+
+NUM_CHAINS_PG = 4
+cfg_pg = ChainConfig(
+    n_warmup=1000, n_samples=5000,
+    prior_loc=0.0, prior_scale=1.0,
+    beta0_sd=5.0, slice_w=1.5, slice_m=20, slice_max_steps=250,
+    inner_latent_cycles=1, learn_p=True, p_prior_conc=200.0,
+    project_affects_beta0=True, diag_every=200, data_flag=True,
+)
+jobs_pg = [(cid, gb, y_perm, 42 + cid, cfg_pg, MU_TRUE)
+           for cid in range(NUM_CHAINS_PG)]
+
+t0_pg = time.perf_counter()
+ctx  = mp.get_context("fork")
+lock = ctx.RLock()
+with ctx.Pool(processes=NUM_CHAINS_PG,
+              initializer=tqdm.set_lock, initargs=(lock,)) as pool:
+    chains_pg = pool.map(_worker_preloaded, jobs_pg)
+t_pg = time.perf_counter() - t0_pg
+
+mu_pg = np.concatenate([o["mu"] for o in chains_pg])
+az_pg = az.convert_to_inference_data(
+    {"mu": np.stack([o["mu"] for o in chains_pg])})
+summ_pg   = az.summary(az_pg, var_names=["mu"])
+ess_pg    = float(summ_pg["ess_bulk"].iloc[0])
+rhat_pg   = float(summ_pg["r_hat"].iloc[0])
+ci90_pg   = (float(np.percentile(mu_pg, 5)), float(np.percentile(mu_pg, 95)))
+
+print(f"\nPG-Gibbs results:")
+print(f"  Wall time:    {t_pg:.1f} s")
+print(f"  M = {M:,}   M_rel = {M_rel} ({n2} pairs + {n3} triplets used)")
+print(f"  mu: mean={mu_pg.mean():.3f}  median={np.median(mu_pg):.3f}  "
+      f"sd={mu_pg.std():.3f}  90%CI=[{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]")
+print(f"  ESS_bulk={ess_pg:.0f}  r_hat={rhat_pg:.3f}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ALGORITHM 2: DiscreteHMCGibbs
+# ═══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("DiscreteHMCGibbs  (4 chains × 2000 samples, 2000 warmup)")
+print("=" * 60)
+
+import jax
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
+from jax import random
+import numpyro
+from numpyro.infer import MCMC, NUTS, DiscreteHMCGibbs
+from geneticinfo import lr_discrete_blockdiag
+
+NUM_CHAINS_HMC = 4
+numpyro.set_host_device_count(NUM_CHAINS_HMC)
+
+# Extract size-2 blocks: L (n2,2,2) and corresponding y (n2*2,)
+assert n2 > 0, "No size-2 blocks found"
+L_blocks_jax = jnp.array(gb.L_by_size[2], dtype=jnp.float64)        # (n2,2,2)
+y_flat_jax   = jnp.array(y_perm[gb.idx_by_size[2]], dtype=jnp.float64)  # (n2*2,)
+p_obs = float(np.mean(y_sample))
+
+print(f"  Using {n2} size-2 blocks (M_rel={2*n2}); "
+      f"{'excluding' if n3>0 else 'no'} {n3} size-3 block(s)")
+
+inner_kernel = NUTS(lr_discrete_blockdiag, max_tree_depth=8)
+kernel = DiscreteHMCGibbs(inner_kernel, modified=True)
+mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
+            num_chains=NUM_CHAINS_HMC, chain_method="parallel",
+            progress_bar=True)
+
+t0_hmc = time.perf_counter()
+mcmc.run(random.PRNGKey(0),
+         L_blocks=L_blocks_jax, y_flat=y_flat_jax,
+         n_blocks=n2, block_size=2, p_obs=p_obs)
+t_hmc = time.perf_counter() - t0_hmc
+
+samples_hmc = mcmc.get_samples()
+mu_hmc = np.array(samples_hmc["mu"])
+az_hmc = az.convert_to_inference_data(
+    {"mu": mu_hmc.reshape(NUM_CHAINS_HMC, -1)})
+summ_hmc  = az.summary(az_hmc, var_names=["mu"])
+ess_hmc   = float(summ_hmc["ess_bulk"].iloc[0])
+rhat_hmc  = float(summ_hmc["r_hat"].iloc[0])
+ci90_hmc  = (float(np.percentile(mu_hmc, 5)), float(np.percentile(mu_hmc, 95)))
+
+print(f"\nDiscreteHMCGibbs results:")
+print(f"  Wall time:    {t_hmc:.1f} s")
+print(f"  M_rel = {2*n2} ({n2} pairs)")
+print(f"  mu: mean={mu_hmc.mean():.3f}  median={float(np.median(mu_hmc)):.3f}  "
+      f"sd={mu_hmc.std():.3f}  90%CI=[{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]")
+print(f"  ESS_bulk={ess_hmc:.0f}  r_hat={rhat_hmc:.3f}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# COMPARISON SUMMARY
+# ═══════════════════════════════════════════════════════════════════════════════
+print("\n" + "=" * 60)
+print("COMPARISON SUMMARY")
+print(f"  True mu = {MU_TRUE}   K = {K}   M = {M:,}   seed = {SEED_DATA}")
+print("=" * 60)
+print(f"  {'Algorithm':<22}  {'median':>7}  {'sd':>6}  {'90% CI':>18}  "
+      f"{'ESS':>6}  {'r_hat':>6}  {'wall':>8}")
+print(f"  {'PG-Gibbs':<22}  {np.median(mu_pg):>7.3f}  {mu_pg.std():>6.3f}  "
+      f"  [{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]  "
+      f"{ess_pg:>6.0f}  {rhat_pg:>6.3f}  {t_pg:>7.1f}s")
+print(f"  {'DiscreteHMCGibbs':<22}  {float(np.median(mu_hmc)):>7.3f}  {mu_hmc.std():>6.3f}  "
+      f"  [{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]  "
+      f"{ess_hmc:>6.0f}  {rhat_hmc:>6.3f}  {t_hmc:>7.1f}s")
