@@ -220,6 +220,7 @@ def sample_beta0_z_fast(
     beta0_sd: float,
     project_affects_beta0: bool = True,
     jitter: float = 1e-12,
+    beta0_fixed: float = None,
 ):
     """Vectorised replacement for sample_beta0_z_gaussian_blocks_joint."""
     tau = 1.0 / (2.0 * mu_pos)
@@ -328,6 +329,15 @@ def sample_beta0_z_fast(
                 gT_invg += float(gv @ X[:,1])
                 gT_invb += float(gv @ X[:,0])
                 gT_inv1 += float(gv @ X[:,2])
+
+    if beta0_fixed is not None:
+        # β₀ is coupled to p_mix (as in DiscreteHMCGibbs): do not sample it.
+        # z is still sampled correctly: z_un = A^{-1}(L^T(κ − ω β₀) + ½r) + noise
+        beta0_new = float(beta0_fixed)
+        z_un  = invb - invg * beta0_new + noise
+        z_new = np.asarray(z_un, dtype=np.float64)
+        z_new -= z_new.mean()
+        return beta0_new, z_new
 
     s_schur = max(a - gT_invg, 1e-18)
     mean_b0 = (b0_info - gT_invb) / s_schur
@@ -633,19 +643,28 @@ def run_one_chain_preloaded(
     seed: int,
     cfg: ChainConfig,
     true_mu: float = float("nan"),
+    p0_override: float = None,
+    fix_beta0_to_pmix: bool = False,
 ) -> dict:
     """
     Run one chain on pre-built GroupedBlocks + permuted y.
     Data is constructed once in the parent process and shared via fork.
+
+    p0_override : if provided, use this value (rather than y_perm.mean()) to
+        centre the Beta prior on p_mix.  Useful when y_perm is a relatives-only
+        subset whose case proportion differs from the full sample prevalence.
+    fix_beta0_to_pmix : if True, constrain beta0 = logit(p_mix) at every Gibbs
+        step (as in lr_discrete_blockdiag / DiscreteHMCGibbs) rather than
+        sampling beta0 freely from its conditional posterior.
     """
     M     = gb.M
     kappa = y_perm - 0.5
 
     rng   = np.random.default_rng(seed)
-    p0    = float(np.mean(y_perm))
+    p0    = float(p0_override) if p0_override is not None else float(np.mean(y_perm))
     a0    = p0 * cfg.p_prior_conc
     b0_p  = (1.0 - p0) * cfg.p_prior_conc
-    p_mix = float(p0)
+    p_mix = float(np.mean(y_perm))   # initialise from actual data proportion
 
     theta  = float(cfg.prior_loc)
     mu_pos = float(np.exp(theta))
@@ -661,6 +680,9 @@ def run_one_chain_preloaded(
                  position=chain_id, leave=True, dynamic_ncols=True)
 
     for it in range(total):
+        b0_fixed = (float(np.log(p_mix + 1e-12) - np.log1p(p_mix))
+                    if fix_beta0_to_pmix else None)
+
         for _ in range(cfg.inner_latent_cycles):
             eta   = beta0 + sparse_matvec(gb, z)
             omega = random_polyagamma(1.0, np.abs(eta))
@@ -674,7 +696,8 @@ def run_one_chain_preloaded(
 
             beta0, z = sample_beta0_z_fast(
                 rng, gb, omega, kappa, r, mu_pos, cfg.beta0_sd,
-                project_affects_beta0=cfg.project_affects_beta0)
+                project_affects_beta0=cfg.project_affects_beta0,
+                beta0_fixed=b0_fixed)
 
         mu_pos = float(np.exp(theta))
         c      = float(update_c_gibbs_cpu(rng, mu_pos, r))
@@ -684,10 +707,13 @@ def run_one_chain_preloaded(
         n_minus = float((r < 0).sum())
         p_mix   = float(rng.beta(a0 + 10.0 * n_plus / (n_plus + n_minus),
                                   b0_p + 10.0 * n_minus / (n_plus + n_minus)))
+        b0_fixed = (float(np.log(p_mix + 1e-12) - np.log1p(p_mix))
+                    if fix_beta0_to_pmix else None)
 
         beta0, z = sample_beta0_z_fast(
             rng, gb, omega, kappa, r, mu_pos, cfg.beta0_sd,
-            project_affects_beta0=cfg.project_affects_beta0)
+            project_affects_beta0=cfg.project_affects_beta0,
+            beta0_fixed=b0_fixed)
 
         cache = build_theta_eig_cache_fast(gb, omega, beta0, kappa, r,
                                            min_block_size=2)
@@ -715,5 +741,13 @@ def run_one_chain_preloaded(
 
 
 def _worker_preloaded(args):
-    chain_id, gb, y_perm, seed, cfg, true_mu = args
-    return run_one_chain_preloaded(chain_id, gb, y_perm, seed, cfg, true_mu)
+    # args may have 6, 7, or 8 elements:
+    #   (chain_id, gb, y_perm, seed, cfg, true_mu)
+    #   (chain_id, gb, y_perm, seed, cfg, true_mu, p0_override)
+    #   (chain_id, gb, y_perm, seed, cfg, true_mu, p0_override, fix_beta0_to_pmix)
+    chain_id, gb, y_perm, seed, cfg, true_mu = args[:6]
+    p0_override      = args[6] if len(args) > 6 else None
+    fix_beta0_to_pmix = args[7] if len(args) > 7 else False
+    return run_one_chain_preloaded(chain_id, gb, y_perm, seed, cfg, true_mu,
+                                   p0_override=p0_override,
+                                   fix_beta0_to_pmix=fix_beta0_to_pmix)

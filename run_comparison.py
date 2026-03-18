@@ -66,12 +66,37 @@ n3 = gb.L_by_size[3].shape[0] if 3 in gb.L_by_size else 0
 M_rel = sum(gb.L_by_size[s].shape[0] * s for s in gb.sizes if s >= 2)
 print(f"  Related (size>=2): {M_rel}  ({n2} pairs, {n3} triplets)")
 
+# Build a relatives-only GroupedBlocks (singletons discarded entirely).
+# Blocks are re-indexed 0..M_rel-1 in size-descending order so that the
+# PG-Gibbs sampler sees the same M_rel individuals as DiscreteHMCGibbs.
+rel_sizes = sorted([s for s in gb.sizes if s >= 2], reverse=True)
+rel_idx_ordered = np.concatenate([gb.idx_by_size[s] for s in rel_sizes])
+y_rel = y_perm[rel_idx_ordered]
+
+new_L_by_size   = {}
+new_idx_by_size = {}
+offset = 0
+for s in rel_sizes:
+    n_s = gb.L_by_size[s].shape[0]
+    new_L_by_size[s]   = gb.L_by_size[s]
+    new_idx_by_size[s] = np.arange(offset, offset + n_s * s)
+    offset += n_s * s
+
+gb_rel = GroupedBlocks(
+    M=M_rel,
+    sizes=rel_sizes,
+    L_by_size=new_L_by_size,
+    idx_by_size=new_idx_by_size,
+)
+print(f"  Relatives-only GroupedBlocks: M={gb_rel.M}  "
+      + "  ".join(f"size-{s}:{gb_rel.L_by_size[s].shape[0]}" for s in gb_rel.sizes))
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ALGORITHM 1: PG-Gibbs
+# ALGORITHM 1: PG-Gibbs  (full case-control sample; singletons excluded from μ)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup)")
+print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup, full sample M)")
 print("=" * 60)
 
 NUM_CHAINS_PG = 4
@@ -82,6 +107,9 @@ cfg_pg = ChainConfig(
     inner_latent_cycles=1, learn_p=True, p_prior_conc=200.0,
     project_affects_beta0=True, diag_every=200, data_flag=True,
 )
+# Use the full permuted dataset (M=29,496).  Singletons constrain beta0 via
+# their 50% case rate, while being excluded from the mu likelihood through
+# min_block_size=2 inside build_theta_eig_cache_fast.
 jobs_pg = [(cid, gb, y_perm, 42 + cid, cfg_pg, MU_TRUE)
            for cid in range(NUM_CHAINS_PG)]
 
@@ -103,7 +131,8 @@ ci90_pg   = (float(np.percentile(mu_pg, 5)), float(np.percentile(mu_pg, 95)))
 
 print(f"\nPG-Gibbs results:")
 print(f"  Wall time:    {t_pg:.1f} s")
-print(f"  M = {M:,}   M_rel = {M_rel} ({n2} pairs + {n3} triplets used)")
+print(f"  M = {M} total; mu likelihood uses M_rel = {M_rel} "
+      f"({n2} pairs + {n3} triplets; singletons excluded from mu update only)")
 print(f"  mu: mean={mu_pg.mean():.3f}  median={np.median(mu_pg):.3f}  "
       f"sd={mu_pg.std():.3f}  90%CI=[{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]")
 print(f"  ESS_bulk={ess_pg:.0f}  r_hat={rhat_pg:.3f}")
@@ -207,7 +236,7 @@ fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=False)
 
 for ax, samples, label, wall, m_rel_used, n_samples_str, color_post in [
     (axes[0], mu_pg,  "PG-Gibbs",
-     t_pg,  f"{M_rel} ({n2} pairs + {n3} triplets)",
+     t_pg,  f"M={M} (singletons excluded from μ update only)",
      f"4 chains × 5,000 samples", "steelblue"),
     (axes[1], mu_hmc, "DiscreteHMCGibbs",
      t_hmc, f"{2*n2} ({n2} pairs; {n3} triplet(s) excluded)",

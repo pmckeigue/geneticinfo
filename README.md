@@ -198,25 +198,25 @@ Related individuals (block size ≥ 2):  1,120
   Blocks: 557 pairs + 2 triplets
 ```
 
-DiscreteHMCGibbs operates on the 557 size-2 blocks (M_rel = 1,114); the 2 size-3 triplet blocks (6 individuals, 0.5% of M_rel) are excluded because `lr_discrete_blockdiag` requires uniform block size.  PG-Gibbs uses all 557 pairs and both triplets.
+DiscreteHMCGibbs operates on the 557 size-2 blocks (M_rel = 1,114); the 2 size-3 triplet blocks (6 individuals, 0.5% of M_rel) are excluded because `lr_discrete_blockdiag` requires uniform block size.  PG-Gibbs uses all 557 pairs and both triplets for the μ likelihood, while retaining all M = 29,496 individuals for the β₀ and z updates.
 
 **Results (true μ = 1.0)**
 
 ```
 Algorithm             median     sd     90% CI          ESS    r_hat   wall time
-PG-Gibbs              0.620   0.221  [0.282, 1.010]   1105    1.000      107 s  (CPU, 4 cores)
-DiscreteHMCGibbs      1.156   0.518  [0.580, 2.127]    296    1.020      325 s  (GPU, 4×Tesla V100)
+PG-Gibbs              0.616   0.227  [0.272, 1.026]    879    1.010      107 s  (CPU, 4 cores)
+DiscreteHMCGibbs      1.139   0.487  [0.594, 2.112]    311    1.000      331 s  (GPU, 4×Tesla V100)
 ```
 
 Both 90% credible intervals contain the true value μ = 1.0.
 
 ![Prior, posterior and likelihood for both algorithms](comparison_prior_posterior_likelihood.png)
 
-**Interpretation.**  DiscreteHMCGibbs produces a wider posterior centred closer to the true value; its posterior median (1.156) is slightly above the truth.  PG-Gibbs produces a narrower posterior whose median (0.620) is below the truth, though the true value lies at the 95th percentile of the posterior.  Several factors contribute to this difference:
+**Interpretation.**  DiscreteHMCGibbs produces a wider posterior centred closer to the true value; its posterior median (1.139) is slightly above the truth.  PG-Gibbs produces a narrower posterior whose median (0.616) is below the truth, with the true value lying at the 95th percentile of the posterior.  Several factors contribute to this difference:
 
-- *Data scope.*  DiscreteHMCGibbs discards the 28,376 singleton individuals entirely and fits only the M_rel = 1,114 relatives.  PG-Gibbs retains all M = 29,496 individuals for the β₀ and z updates (using the singletons to constrain the intercept), while excluding them from the μ likelihood.  The richer information from singletons about β₀ may alter the effective likelihood seen by μ.
+- *Intercept handling.*  In `lr_discrete_blockdiag`, β₀ is a deterministic function of the mixing proportion p (β₀ = logit(p)), with p ~ Beta(10, 10) centred at the full-sample case proportion 0.5.  This prevents β₀ from freely absorbing the ascertainment-induced case enrichment among relatives (~67% cases in the relatives-only subset).  In PG-Gibbs, β₀ is sampled jointly with z via a Schur complement and is constrained indirectly by the singletons (28,376 individuals with 50% case rate), which anchor β₀ near zero through the full-sample β₀ posterior.
 
-- *Mixing.*  The PG-Gibbs IAT ≈ 18 (20,000 samples / ESS 1,105) is much lower than DiscreteHMCGibbs IAT ≈ 27 (8,000 samples / ESS 296), reflecting faster mixing from the collapsed μ update.
+- *Mixing.*  The PG-Gibbs IAT ≈ 23 (20,000 samples / ESS 879) is lower than DiscreteHMCGibbs IAT ≈ 26 (8,000 samples / ESS 311), reflecting faster mixing from the collapsed μ update.
 
 - *Posterior concentration.*  With K = 0.01 and 1:1 case-control matching, most relative pairs in the sample are discordant (one case, one control), which carry less information about λ_S than concordant-affected pairs.  The half-Cauchy(1) prior, which has substantial mass at small μ, therefore has considerable influence on both posteriors.
 
@@ -231,11 +231,11 @@ Both 90% credible intervals contain the true value μ = 1.0.
 | Discrete latents r_i | Gibbs via DiscreteHMCGibbs | Collapsed for μ; exact enumeration for z |
 | Continuous update | NUTS (joint μ, s, β₀) | Slice sampler on θ = log μ; Gaussian draw for β₀, z |
 | Prior on μ | Half-Cauchy(1) | Half-Cauchy(1) |
-| μ posterior median (true = 1.0) | 1.156 | 0.620 |
-| μ 90% CI | [0.580, 2.127] | [0.282, 1.010] |
-| ESS (bulk) | 296 from 8,000 samples | 1,105 from 20,000 samples |
-| IAT | ~27 | ~18 |
-| Wall time (same dataset) | 325 s | 107 s |
+| μ posterior median (true = 1.0) | 1.139 | 0.616 |
+| μ 90% CI | [0.594, 2.112] | [0.272, 1.026] |
+| ESS (bulk) | 311 from 8,000 samples | 879 from 20,000 samples |
+| IAT | ~26 | ~23 |
+| Wall time (same dataset) | 331 s | 107 s |
 
 ---
 
