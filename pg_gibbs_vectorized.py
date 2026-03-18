@@ -122,7 +122,9 @@ def _build_eig_contributions_size2(Ls, omega_g, beta0, kappa_g, r_g):
 
 
 def build_theta_eig_cache_fast(gb: GroupedBlocks, omega, beta0, kappa, r,
-                               min_block_size: int = 1):
+                               min_block_size: int = 1,
+                               collapse_beta0: bool = False,
+                               beta0_sd: float = 5.0):
     """
     Vectorised theta-cache.  Returns flat arrays (length M_related) rather
     than a Python list of M small arrays, so the log-posterior evaluation
@@ -132,11 +134,22 @@ def build_theta_eig_cache_fast(gb: GroupedBlocks, omega, beta0, kappa, r,
       Set to 2 to exclude singletons from the theta log-posterior: singletons
       carry no information about lambda_S / mu and their z-prior penalty
       (-0.25*M*mu term) otherwise biases mu towards small values.
+
+    collapse_beta0: if True, marginalise β₀ analytically in the theta
+      log-posterior (Schur correction).  Uses b_b0 = L^T κ + ½r (without β₀
+      correction) and also computes proj_g (projections of g_b = L^T ω_b),
+      sum_omega, sum_kappa.  theta_logpost_fast then adds the Schur correction
+        +½ β̄₀² s_schur − ½ log s_schur
+      where s_schur = sum_omega + 1/beta0_sd² − Σ_b g_b^T A_b^{-1} g_b
+      and   β̄₀     = (sum_kappa − Σ_b g_b^T A_b^{-1} b_b0) / s_schur.
+    beta0_sd: prior std for β₀ (used when collapse_beta0=True).
     """
-    # Collect contributions only from blocks of size >= min_block_size
-    ev_parts   = []
-    proj_parts = []
-    M_related  = 0
+    ev_parts     = []
+    proj_parts   = []
+    proj_g_parts = [] if collapse_beta0 else None
+    sum_omega_val = 0.0
+    sum_kappa_val = 0.0
+    M_related    = 0
 
     for s in gb.sizes:
         if s < min_block_size:
@@ -148,28 +161,83 @@ def build_theta_eig_cache_fast(gb: GroupedBlocks, omega, beta0, kappa, r,
         kappa_g = kappa[idx].reshape(n_s, s)
         r_g     = r[idx].reshape(n_s, s)
 
+        if collapse_beta0:
+            sum_omega_val += float(omega_g.sum())
+            sum_kappa_val += float(kappa_g.sum())
+
         if s == 1:
-            ev, pr = _build_eig_contributions_size1(
-                Ls, omega_g[:, 0], beta0, kappa_g[:, 0], r_g[:, 0], tau=0.0)
+            l  = Ls[:, 0, 0]
+            ev = (l * l) * omega_g[:, 0]   # eigenvalue of 1×1 K
+            if collapse_beta0:
+                pr = l * kappa_g[:, 0] + 0.5 * r_g[:, 0]   # b_b0: no β₀
+                pg = l * omega_g[:, 0]                        # g = L^T ω; proj trivial
+                proj_g_parts.append(pg)
+            else:
+                pr = l * (kappa_g[:, 0] - omega_g[:, 0] * beta0) + 0.5 * r_g[:, 0]
             ev_parts.append(ev)
             proj_parts.append(pr)
+
         elif s == 2:
-            evs, prs = _build_eig_contributions_size2(
-                Ls, omega_g, beta0, kappa_g, r_g)
-            ev_parts.append(evs.ravel())
-            proj_parts.append(prs.ravel())
+            sqrt_w = np.sqrt(omega_g)          # (n,2)
+            Wb = Ls * sqrt_w[:, :, None]        # (n,2,2)
+            K  = np.einsum('nki,nkj->nij', Wb, Wb)   # (n,2,2)
+
+            LsT = np.transpose(Ls, (0, 2, 1))   # (n,2,2): L^T
+            if collapse_beta0:
+                b = np.einsum('nij,nj->ni', LsT, kappa_g) + 0.5 * r_g   # b_b0 = L^T κ + ½r
+                g = np.einsum('nij,nj->ni', LsT, omega_g)                 # g = L^T ω
+            else:
+                t = kappa_g - omega_g * beta0
+                b = np.einsum('nij,nj->ni', Ls, t) + 0.5 * r_g
+
+            # 2×2 analytical eigh
+            a   = K[:, 0, 0]; bk = K[:, 0, 1]; c = K[:, 1, 1]
+            tr  = a + c
+            det = a * c - bk * bk
+            disc = np.sqrt(np.maximum((tr*tr - 4.0*det), 0.0))
+            lam0 = (tr - disc) * 0.5
+            lam1 = (tr + disc) * 0.5
+            eigvals = np.stack([lam0, lam1], axis=1)
+
+            v0 = lam0 - c; v1 = bk
+            nrm = np.sqrt(v0*v0 + v1*v1)
+            tiny = nrm < 1e-15
+            nrm  = np.where(tiny, 1.0, nrm)
+            u0   = np.where(tiny, 1.0, v0 / nrm)
+            u1   = np.where(tiny, 0.0, v1 / nrm)
+
+            proj0 =  u0 * b[:, 0] + u1 * b[:, 1]
+            proj1 = -u1 * b[:, 0] + u0 * b[:, 1]
+            ev_parts.append(eigvals.ravel())
+            proj_parts.append(np.stack([proj0, proj1], axis=1).ravel())
+
+            if collapse_beta0:
+                pg0 =  u0 * g[:, 0] + u1 * g[:, 1]
+                pg1 = -u1 * g[:, 0] + u0 * g[:, 1]
+                proj_g_parts.append(np.stack([pg0, pg1], axis=1).ravel())
+
         else:
             ev_b_list = []; pr_b_list = []
+            if collapse_beta0:
+                prg_b_list = []
             for i in range(n_s):
                 sl = idx[i*s:(i+1)*s]
                 Lb = Ls[i];  omega_b = omega[sl];  kappa_b = kappa[sl];  r_b = r[sl]
                 Wb = Lb * np.sqrt(omega_b)[:, None]
                 Kb = Wb.T @ Wb
-                b  = Lb.T @ (kappa_b - omega_b * beta0) + 0.5 * r_b
+                if collapse_beta0:
+                    b = Lb.T @ kappa_b + 0.5 * r_b            # b_b0: no β₀
+                    g = Lb.T @ omega_b                          # g = L^T ω
+                else:
+                    b = Lb.T @ (kappa_b - omega_b * beta0) + 0.5 * r_b
                 ev_bi, U = np.linalg.eigh(Kb)
                 ev_b_list.append(ev_bi);  pr_b_list.append(U.T @ b)
+                if collapse_beta0:
+                    prg_b_list.append(U.T @ g)
             ev_parts.append(np.concatenate(ev_b_list))
             proj_parts.append(np.concatenate(pr_b_list))
+            if collapse_beta0:
+                proj_g_parts.append(np.concatenate(prg_b_list))
         M_related += n_s * s
 
     if ev_parts:
@@ -179,8 +247,15 @@ def build_theta_eig_cache_fast(gb: GroupedBlocks, omega, beta0, kappa, r,
         eigvals_flat = np.empty(0)
         proj_flat    = np.empty(0)
 
-    return {"eigvals_flat": eigvals_flat, "proj_flat": proj_flat,
-            "M_total": M_related}
+    cache = {"eigvals_flat": eigvals_flat, "proj_flat": proj_flat,
+             "M_total": M_related}
+    if collapse_beta0:
+        cache["proj_g_flat"] = (np.concatenate(proj_g_parts)
+                                if proj_g_parts else np.empty(0))
+        cache["sum_omega"]  = sum_omega_val
+        cache["sum_kappa"]  = sum_kappa_val
+        cache["beta0_sd"]   = float(beta0_sd)
+    return cache
 
 
 def theta_logpost_fast(theta: float, cache: dict,
@@ -189,6 +264,12 @@ def theta_logpost_fast(theta: float, cache: dict,
     Evaluate log p(theta | cache) using flat vectorised arrays.
     O(M) numpy — replaces the O(M)-iteration Python loop in
     collapsed_logpost_theta_uncentered_blocks_eig.
+
+    When the cache contains 'proj_g_flat' (built with collapse_beta0=True),
+    a Schur correction is added that marginalises β₀ analytically:
+      +½ β̄₀² s_schur − ½ log s_schur
+    where  s_schur = sum_omega + 1/beta0_sd² − Σ proj_g² / lam_tau
+           β̄₀     = (sum_kappa − Σ proj_g·proj_b / lam_tau) / s_schur.
     """
     mu     = np.exp(theta)
     tau    = 0.5 / mu
@@ -201,13 +282,22 @@ def theta_logpost_fast(theta: float, cache: dict,
     quad    = float(np.sum(pr * pr / lam_tau))
 
     # Half-Cauchy(prior_scale) prior on mu.
-    # p(mu) = 2 / (pi * prior_scale * (1 + (mu/prior_scale)^2))
-    # Change of variables theta = log(mu): add log|d(mu)/d(theta)| = theta.
     lp_prior = theta - np.log(1.0 + (mu / prior_scale) ** 2)
 
-    return (0.5 * quad - 0.5 * logdet
-            - 0.25 * M * mu - 0.5 * M * np.log(2.0 * mu)
-            + lp_prior)
+    lp = (0.5 * quad - 0.5 * logdet
+          - 0.25 * M * mu - 0.5 * M * np.log(2.0 * mu)
+          + lp_prior)
+
+    if "proj_g_flat" in cache:
+        pg          = cache["proj_g_flat"]
+        gT_invg     = float(np.sum(pg * pg / lam_tau))
+        gT_invb0    = float(np.sum(pg * pr / lam_tau))
+        s_schur     = cache["sum_omega"] + 1.0 / cache["beta0_sd"] ** 2 - gT_invg
+        s_schur     = max(s_schur, 1e-18)
+        beta0_bar   = (cache["sum_kappa"] - gT_invb0) / s_schur
+        lp += 0.5 * beta0_bar ** 2 * s_schur - 0.5 * np.log(s_schur)
+
+    return lp
 
 
 def sample_beta0_z_fast(
@@ -645,6 +735,7 @@ def run_one_chain_preloaded(
     true_mu: float = float("nan"),
     p0_override: float = None,
     fix_beta0_to_pmix: bool = False,
+    collapse_beta0: bool = False,
 ) -> dict:
     """
     Run one chain on pre-built GroupedBlocks + permuted y.
@@ -656,6 +747,10 @@ def run_one_chain_preloaded(
     fix_beta0_to_pmix : if True, constrain beta0 = logit(p_mix) at every Gibbs
         step (as in lr_discrete_blockdiag / DiscreteHMCGibbs) rather than
         sampling beta0 freely from its conditional posterior.
+    collapse_beta0 : if True, marginalise β₀ analytically in the theta
+        log-posterior (Schur correction).  Uses cfg.beta0_sd as the prior std
+        for β₀.  The gb passed should contain only relatives (all blocks >= 2)
+        so that min_block_size=1 captures all individuals.
     """
     M     = gb.M
     kappa = y_perm - 0.5
@@ -715,8 +810,14 @@ def run_one_chain_preloaded(
             project_affects_beta0=cfg.project_affects_beta0,
             beta0_fixed=b0_fixed)
 
-        cache = build_theta_eig_cache_fast(gb, omega, beta0, kappa, r,
-                                           min_block_size=2)
+        if collapse_beta0:
+            cache = build_theta_eig_cache_fast(
+                gb, omega, beta0, kappa, r,
+                min_block_size=1,
+                collapse_beta0=True, beta0_sd=cfg.beta0_sd)
+        else:
+            cache = build_theta_eig_cache_fast(gb, omega, beta0, kappa, r,
+                                               min_block_size=2)
         f_th  = lambda th: theta_logpost_fast(
             float(th), cache, float(cfg.prior_loc), float(cfg.prior_scale))
         theta = float(slice_sample_theta_collapsed_numpy(
@@ -741,13 +842,16 @@ def run_one_chain_preloaded(
 
 
 def _worker_preloaded(args):
-    # args may have 6, 7, or 8 elements:
+    # args may have 6–9 elements:
     #   (chain_id, gb, y_perm, seed, cfg, true_mu)
     #   (chain_id, gb, y_perm, seed, cfg, true_mu, p0_override)
     #   (chain_id, gb, y_perm, seed, cfg, true_mu, p0_override, fix_beta0_to_pmix)
+    #   (chain_id, gb, y_perm, seed, cfg, true_mu, p0_override, fix_beta0_to_pmix, collapse_beta0)
     chain_id, gb, y_perm, seed, cfg, true_mu = args[:6]
-    p0_override      = args[6] if len(args) > 6 else None
+    p0_override       = args[6] if len(args) > 6 else None
     fix_beta0_to_pmix = args[7] if len(args) > 7 else False
+    collapse_beta0    = args[8] if len(args) > 8 else False
     return run_one_chain_preloaded(chain_id, gb, y_perm, seed, cfg, true_mu,
                                    p0_override=p0_override,
-                                   fix_beta0_to_pmix=fix_beta0_to_pmix)
+                                   fix_beta0_to_pmix=fix_beta0_to_pmix,
+                                   collapse_beta0=collapse_beta0)

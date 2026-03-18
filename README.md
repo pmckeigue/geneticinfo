@@ -134,16 +134,25 @@ mcmc.print_summary()
 
 An alternative Gibbs sampler is implemented in `pg_gibbs_vectorized.py` using the Pólya-gamma (PG) data-augmentation scheme of Polson, Scott and Windle (2013).  Introducing per-individual auxiliary variables ω_i ~ PG(1, |η_i|) renders the logistic likelihood conditionally Gaussian, enabling exact block Gibbs updates for all continuous latents.
 
-Unlike `DiscreteHMCGibbs`, the PG sampler:
+The PG sampler:
 
-- **Operates on the full case-control sample** (M individuals, including singletons), keeping singletons for the β₀ and z updates while excluding them from the μ likelihood.
-- **Collapses z out analytically** when sampling μ: the precision matrix of each family block is diagonalised via an eigenvalue cache, and the slice sampler for θ = log μ evaluates the collapsed log-posterior in O(M_rel) time.
-- **Handles mixed block sizes** (pairs, triplets, …) with vectorised routines grouped by size; singletons are batched in a single NumPy pass.
+- **Operates on M_rel relatives only** (singletons discarded), matching the data used by `DiscreteHMCGibbs`.
+- **Collapses both z and β₀ out analytically** when sampling μ: the θ log-posterior marginalises β₀ via a Schur correction, so the slice sampler evaluates the correct collapsed log-posterior p(θ | ω, r, y) in O(M_rel) time.
+- **Handles mixed block sizes** (pairs, triplets, …) with vectorised routines grouped by size.
 - **Runs on CPU** via `multiprocessing.Pool` with fork, with no JAX or GPU dependency.
 
-#### Singleton exclusion from the μ likelihood
+#### Collapsed β₀ update (Schur correction)
 
-The collapsed log-posterior for θ contains terms −¼ M μ − ½ M log(2μ) arising from the z-prior normalisation. For singleton blocks these terms carry no information about λ_S but impose a strong downward pull when M ≫ M_rel. The sampler therefore restricts this sum to blocks of size ≥ 2, using only the M_rel ≪ M related individuals for the μ update.
+The collapsed θ log-posterior marginalises β₀ jointly with z:
+
+```
+log p(θ | ω, r, y) = log p(θ)
+  + ½ Σ_b [b_b0^T A_b^{-1} b_b0 − log det A_b]   ← eigenvalue cache; b_b0 = L^T κ + ½r
+  + ½ β̄₀² s_schur − ½ log s_schur                ← Schur correction for β₀
+  − ¼ M_rel μ − ½ M_rel log(2μ)                   ← z-prior normalisation
+```
+
+where A_b = L_b^T diag(ω_b) L_b + τI, s_schur = Σ ω_i + 1/σ_β₀² − Σ_b g_b^T A_b^{-1} g_b, g_b = L_b^T ω_b, and β̄₀ = (Σ κ_i − Σ_b g_b^T A_b^{-1} b_b0) / s_schur.  The prior σ_β₀ ≈ 0.436 matches the logit effective standard deviation of Beta(10,10), matching `lr_discrete_blockdiag`'s p prior.
 
 #### Performance
 
@@ -178,11 +187,10 @@ This simulates a large case-control dataset with full-sib pairs, full-sib triple
 #### Posterior summary (4 chains, 1000 warmup + 5000 samples, CPU)
 
 ```
-     mean     sd  hdi_3%  hdi_97%  mcse_mean  mcse_sd  ess_bulk  ess_tail  r_hat
-mu  0.632  0.219   0.225    1.044      0.007    0.004    1027.0    1916.0    1.0
+  mu: mean=0.760  median=0.752  sd=0.245  90%CI=[0.375,1.184]  ESS_bulk=674  r_hat=1.000
 ```
 
-True value: μ = 1.00.  90% CI: [0.291, 1.006].  Wall time: ~1 min 43 s on CPU (4 cores).
+True value: μ = 1.00.  90% CI [0.375, 1.184] contains the true value.  Wall time: ~30 s on CPU (4 cores, M_rel = 1120).
 
 ---
 
@@ -198,27 +206,27 @@ Related individuals (block size ≥ 2):  1,120
   Blocks: 557 pairs + 2 triplets
 ```
 
-DiscreteHMCGibbs now operates on all M_rel = 1,120 relatives: 557 size-2 (pair) blocks and 2 size-3 (triplet) blocks.  PG-Gibbs uses the same M_rel individuals for the μ likelihood, while retaining all M = 29,496 individuals for the β₀ and z updates.
+Both algorithms now operate on M_rel = 1,120 relatives only: 557 size-2 (pair) blocks and 2 size-3 (triplet) blocks.  PG-Gibbs marginalises β₀ analytically in the θ update (Schur correction) using the same informative prior as `lr_discrete_blockdiag` (σ_β₀ ≈ 0.436, matching Beta(10,10)→logit).
 
 **Results (true μ = 1.0)**
 
 ```
 Algorithm             median     sd     90% CI          ESS    r_hat   wall time
-PG-Gibbs              0.630   0.217  [0.286, 1.000]   1078    1.000      105 s  (CPU, 4 cores)
-DiscreteHMCGibbs      0.968   0.408  [0.444, 1.767]    435    1.010      377 s  (GPU, 4×Tesla V100)
+PG-Gibbs              0.752   0.245  [0.375, 1.184]    674    1.000       30 s  (CPU, 4 cores)
+DiscreteHMCGibbs      0.958   0.382  [0.472, 1.705]    459    1.010      363 s  (GPU, 4×Tesla V100)
 ```
 
 Both 90% credible intervals contain the true value μ = 1.0.
 
 ![Prior, posterior and likelihood for both algorithms](comparison_prior_posterior_likelihood.png)
 
-**Interpretation.**  Including the 2 triplet blocks in DiscreteHMCGibbs (previously excluded because `lr_discrete_blockdiag` required uniform block size) shifts its posterior median from 1.139 to 0.968 and increases ESS from 311 to 435.  Both posteriors are now centred near the true value, though from different directions.  Several factors contribute to the remaining difference:
+**Interpretation.**  The two posteriors overlap substantially.  Several factors contribute to the remaining difference (PG-Gibbs median 0.752 vs DiscreteHMCGibbs median 0.958):
 
-- *Intercept handling.*  In `lr_discrete_blockdiag`, β₀ is a deterministic function of the mixing proportion p (β₀ = logit(p)), with p ~ Beta(10, 10) centred at the full-sample case proportion 0.5.  This prevents β₀ from freely absorbing the ascertainment-induced case enrichment among relatives (~67% cases in the relatives-only subset).  In PG-Gibbs, β₀ is sampled jointly with z via a Schur complement and is constrained indirectly by the singletons (28,376 individuals with 50% case rate), which anchor β₀ near zero through the full-sample β₀ posterior.
+- *Intercept handling.*  In `lr_discrete_blockdiag`, β₀ = logit(p) is a deterministic function of the mixing proportion (one degree of freedom), with p ~ Beta(10,10).  In PG-Gibbs, β₀ and p_mix are sampled as separate parameters: β₀ from its Gaussian conditional via Schur complement, and p_mix from a Beta posterior.  This residual difference in model specification produces a slight shift.
 
-- *Mixing.*  The PG-Gibbs IAT ≈ 19 (20,000 samples / ESS 1,078) is lower than DiscreteHMCGibbs IAT ≈ 18 (8,000 samples / ESS 435), reflecting comparable mixing from the collapsed μ update.
+- *Mixing.*  The PG-Gibbs IAT ≈ 37 (20,000 samples / ESS 674) vs DiscreteHMCGibbs IAT ≈ 17 (8,000 samples / ESS 459), reflecting somewhat slower mixing in the collapsed θ update.
 
-- *Posterior concentration.*  With K = 0.01 and 1:1 case-control matching, most relative pairs in the sample are discordant (one case, one control), which carry less information about λ_S than concordant-affected pairs.  The half-Cauchy(1) prior, which has substantial mass at small μ, therefore has considerable influence on both posteriors.
+- *Posterior concentration.*  With K = 0.01 and 1:1 case-control matching, most relative pairs in the sample are discordant, carrying less information about λ_S than concordant-affected pairs.  The half-Cauchy(1) prior has considerable influence on both posteriors.
 
 ## Algorithm comparison
 
@@ -226,16 +234,17 @@ Both 90% credible intervals contain the true value μ = 1.0.
 |---|---|---|
 | Framework | NumPyro / JAX | NumPy (pure CPU) |
 | Hardware | GPU (4 × Tesla V100) | CPU (4 cores) |
-| Individuals used | M_rel only (singletons discarded) | All M (singletons excluded from μ update only) |
-| Mixed block sizes | No (same-size blocks required) | Yes (pairs, triplets, … grouped by size) |
-| Discrete latents r_i | Gibbs via DiscreteHMCGibbs | Collapsed for μ; exact enumeration for z |
-| Continuous update | NUTS (joint μ, s, β₀) | Slice sampler on θ = log μ; Gaussian draw for β₀, z |
+| Individuals used | M_rel only (singletons discarded) | M_rel only (singletons discarded) |
+| Mixed block sizes | Yes (L_list/y_list/sizes interface) | Yes (pairs, triplets, … grouped by size) |
+| Discrete latents r_i | Exact enumeration via DiscreteHMCGibbs | Exact enumeration per block (collapsed for θ) |
+| Continuous update | NUTS (joint μ, s, β₀) | Slice sampler on θ = log μ with Schur-collapsed β₀; Gaussian draw for β₀, z |
+| β₀ prior | logit(p), p ~ Beta(10,10) | N(0, σ²), σ ≈ 0.436; marginalised in θ update |
 | Prior on μ | Half-Cauchy(1) | Half-Cauchy(1) |
-| μ posterior median (true = 1.0) | 0.968 | 0.630 |
-| μ 90% CI | [0.444, 1.767] | [0.286, 1.000] |
-| ESS (bulk) | 435 from 8,000 samples | 1,078 from 20,000 samples |
-| IAT | ~18 | ~19 |
-| Wall time (same dataset) | 377 s | 105 s |
+| μ posterior median (true = 1.0) | 0.958 | 0.752 |
+| μ 90% CI | [0.472, 1.705] | [0.375, 1.184] |
+| ESS (bulk) | 459 from 8,000 samples | 674 from 20,000 samples |
+| IAT | ~17 | ~37 |
+| Wall time (same dataset) | 363 s | 30 s |
 
 ---
 

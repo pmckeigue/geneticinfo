@@ -93,24 +93,32 @@ print(f"  Relatives-only GroupedBlocks: M={gb_rel.M}  "
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ALGORITHM 1: PG-Gibbs  (full case-control sample; singletons excluded from μ)
+# ALGORITHM 1: PG-Gibbs  (M_rel relatives only; β₀ marginalised in θ update)
 # ═══════════════════════════════════════════════════════════════════════════════
 print("\n" + "=" * 60)
-print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup, full sample M)")
+print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup, M_rel relatives only)")
 print("=" * 60)
+
+# Match DiscreteHMCGibbs model:
+#   - p ~ Beta(10,10) → logit(p) ≈ N(0, σ) with σ ≈ sqrt(1/(0.25*21)) ≈ 0.436
+#   - p_prior_conc = 20 → Beta(10, 10) with prior centred at p_obs = 0.5
+#   - collapse_beta0=True: β₀ marginalised analytically in θ log-posterior
+BETA0_SD_REL = float(np.sqrt(1.0 / (0.25 * 21.0)))   # ≈ 0.436
 
 NUM_CHAINS_PG = 4
 cfg_pg = ChainConfig(
     n_warmup=1000, n_samples=5000,
     prior_loc=0.0, prior_scale=1.0,
-    beta0_sd=5.0, slice_w=1.5, slice_m=20, slice_max_steps=250,
-    inner_latent_cycles=1, learn_p=True, p_prior_conc=200.0,
+    beta0_sd=BETA0_SD_REL, slice_w=1.5, slice_m=20, slice_max_steps=250,
+    inner_latent_cycles=1, learn_p=True, p_prior_conc=20.0,
     project_affects_beta0=True, diag_every=200, data_flag=True,
 )
-# Use the full permuted dataset (M=29,496).  Singletons constrain beta0 via
-# their 50% case rate, while being excluded from the mu likelihood through
-# min_block_size=2 inside build_theta_eig_cache_fast.
-jobs_pg = [(cid, gb, y_perm, 42 + cid, cfg_pg, MU_TRUE)
+# Use gb_rel (M_rel relatives only) with p0_override=p_obs (full-sample case
+# rate) to centre the Beta prior at 0.5, and collapse_beta0=True to
+# marginalise β₀ analytically in the θ log-posterior.
+p_obs_full = float(np.mean(y_sample))
+jobs_pg = [(cid, gb_rel, y_rel, 42 + cid, cfg_pg, MU_TRUE,
+            p_obs_full, False, True)   # p0_override, fix_beta0_to_pmix, collapse_beta0
            for cid in range(NUM_CHAINS_PG)]
 
 t0_pg = time.perf_counter()
@@ -131,8 +139,7 @@ ci90_pg   = (float(np.percentile(mu_pg, 5)), float(np.percentile(mu_pg, 95)))
 
 print(f"\nPG-Gibbs results:")
 print(f"  Wall time:    {t_pg:.1f} s")
-print(f"  M = {M} total; mu likelihood uses M_rel = {M_rel} "
-      f"({n2} pairs + {n3} triplets; singletons excluded from mu update only)")
+print(f"  M_rel = {M_rel} ({n2} pairs + {n3} triplets; β₀ marginalised in θ update)")
 print(f"  mu: mean={mu_pg.mean():.3f}  median={np.median(mu_pg):.3f}  "
       f"sd={mu_pg.std():.3f}  90%CI=[{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]")
 print(f"  ESS_bulk={ess_pg:.0f}  r_hat={rhat_pg:.3f}")
@@ -246,10 +253,10 @@ fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=False)
 
 for ax, samples, label, wall, m_rel_used, n_samples_str, color_post in [
     (axes[0], mu_pg,  "PG-Gibbs",
-     t_pg,  f"M={M} (singletons excluded from μ update only)",
+     t_pg,  f"M_rel={M_rel} ({n2} pairs + {n3} triplets; β₀ collapsed)",
      f"4 chains × 5,000 samples", "steelblue"),
     (axes[1], mu_hmc, "DiscreteHMCGibbs",
-     t_hmc, f"{2*n2} ({n2} pairs; {n3} triplet(s) excluded)",
+     t_hmc, f"M_rel={M_hmc} ({n2} pairs + {n3} triplets)",
      f"4 chains × 2,000 samples", "darkorange"),
 ]:
     mu_max  = max(4.0, float(np.percentile(samples, 99)) * 1.6)
