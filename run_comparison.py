@@ -4,7 +4,7 @@ simulated from a population with full-sib pairs, full-sib triplets, and
 half-sib pairs.  True mu = 1.0, K = 0.01.
 
 DiscreteHMCGibbs (JAX/NumPyro, GPU):
-  - Operates on M_rel individuals in relative-only blocks of size 2
+  - Operates on M_rel individuals in relative-only blocks (all sizes >= 2)
   - Fits lr_discrete_blockdiag; 4 chains, 2000 warmup + 2000 samples
 
 PG-Gibbs (NumPy, CPU):
@@ -156,14 +156,25 @@ from geneticinfo import lr_discrete_blockdiag
 NUM_CHAINS_HMC = 4
 numpyro.set_host_device_count(NUM_CHAINS_HMC)
 
-# Extract size-2 blocks: L (n2,2,2) and corresponding y (n2*2,)
+# Build per-size block lists for lr_discrete_blockdiag.
+# Order: largest blocks first (size-3 before size-2) so individuals are
+# laid out consistently with gb_rel.
 assert n2 > 0, "No size-2 blocks found"
-L_blocks_jax = jnp.array(gb.L_by_size[2], dtype=jnp.float64)        # (n2,2,2)
-y_flat_jax   = jnp.array(y_perm[gb.idx_by_size[2]], dtype=jnp.float64)  # (n2*2,)
 p_obs = float(np.mean(y_sample))
 
-print(f"  Using {n2} size-2 blocks (M_rel={2*n2}); "
-      f"{'excluding' if n3>0 else 'no'} {n3} size-3 block(s)")
+hmc_sizes  = []
+hmc_L_list = []
+hmc_y_list = []
+for s in sorted(gb.sizes, reverse=True):
+    if s < 2:
+        continue
+    hmc_sizes.append(s)
+    hmc_L_list.append(jnp.array(gb.L_by_size[s], dtype=jnp.float64))
+    hmc_y_list.append(jnp.array(y_perm[gb.idx_by_size[s]], dtype=jnp.float64))
+
+M_hmc = sum(L.shape[0] * s for L, s in zip(hmc_L_list, hmc_sizes))
+size_str = "  ".join(f"{L.shape[0]} size-{s}" for L, s in zip(hmc_L_list, hmc_sizes))
+print(f"  Using M_rel={M_hmc}: {size_str}")
 
 inner_kernel = NUTS(lr_discrete_blockdiag, max_tree_depth=8)
 kernel = DiscreteHMCGibbs(inner_kernel, modified=True)
@@ -173,8 +184,7 @@ mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
 
 t0_hmc = time.perf_counter()
 mcmc.run(random.PRNGKey(0),
-         L_blocks=L_blocks_jax, y_flat=y_flat_jax,
-         n_blocks=n2, block_size=2, p_obs=p_obs)
+         L_list=hmc_L_list, y_list=hmc_y_list, sizes=hmc_sizes, p_obs=p_obs)
 t_hmc = time.perf_counter() - t0_hmc
 
 samples_hmc = mcmc.get_samples()
@@ -188,7 +198,7 @@ ci90_hmc  = (float(np.percentile(mu_hmc, 5)), float(np.percentile(mu_hmc, 95)))
 
 print(f"\nDiscreteHMCGibbs results:")
 print(f"  Wall time:    {t_hmc:.1f} s")
-print(f"  M_rel = {2*n2} ({n2} pairs)")
+print(f"  M_rel = {M_hmc} ({size_str})")
 print(f"  mu: mean={mu_hmc.mean():.3f}  median={float(np.median(mu_hmc)):.3f}  "
       f"sd={mu_hmc.std():.3f}  90%CI=[{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]")
 print(f"  ESS_bulk={ess_hmc:.0f}  r_hat={rhat_hmc:.3f}")

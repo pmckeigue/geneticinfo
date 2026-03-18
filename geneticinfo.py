@@ -123,36 +123,40 @@ def lr_discrete(M=None, L=None, y=None, muprior=dist.Gamma, priorscale=0.75, pri
     numpyro.sample("y", dist.Bernoulli(logits=beta0 + G), obs=y)
 
 
-def lr_discrete_blockdiag(L_blocks=None, y_flat=None, n_blocks=None, block_size=None,
-                           p_obs=None, muprior=dist.Gamma, priorscale=0.75, priorloc=2.0):
+def lr_discrete_blockdiag(L_list=None, y_list=None, sizes=None, p_obs=None,
+                           muprior=dist.HalfCauchy, priorscale=1.0):
     """Block-diagonal variant of lr_discrete for relatives-only data.
 
-    Operates on batched Cholesky factors of uniform-size family blocks,
-    using einsum for efficient batched matmul instead of a single large
-    M x M matrix multiply.
+    Handles mixed block sizes (pairs, triplets, etc.) by grouping blocks
+    by size and applying a batched einsum per group.
 
     Parameters
     ----------
-    L_blocks : jnp.ndarray, shape (n_blocks, block_size, block_size)
-        Per-block Cholesky factors of the genetic relationship sub-matrices.
-    y_flat : jnp.ndarray, shape (n_blocks * block_size,)
-        Flattened binary outcomes, block-contiguous.
-    n_blocks : int
-        Number of family blocks.
-    block_size : int
-        Uniform size of each block.
+    L_list : list of jnp.ndarray
+        Per-size list of Cholesky factor arrays.  L_list[i] has shape
+        (n_i, sizes[i], sizes[i]).  Groups should be in the same order as
+        sizes and y_list; individuals are concatenated in that order.
+    y_list : list of jnp.ndarray
+        Per-size list of outcome vectors.  y_list[i] has shape
+        (n_i * sizes[i],).
+    sizes : list of int
+        Block sizes corresponding to L_list / y_list entries.
     p_obs : float
-        Observed case proportion in the full sample (for the Beta prior).
-    muprior, priorscale, priorloc :
-        Prior family and hyperparameters for mu (same as lr_discrete).
+        Observed case proportion in the full sample (for the Beta prior on p).
+    muprior : numpyro distribution class or instance
+        Prior for mu.  Defaults to HalfCauchy; pass an instantiated
+        distribution to override.
+    priorscale : float
+        Scale parameter passed to muprior (ignored if muprior is already
+        an instantiated distribution).
     """
-    M = n_blocks * block_size
+    M = sum(L.shape[0] * s for L, s in zip(L_list, sizes))
 
     K = 20
     p = numpyro.sample("p", dist.Beta(K * p_obs, K * (1.0 - p_obs)))
     beta0 = jnp.log(p / (1.0 - p))
 
-    mu_dist = muprior if isinstance(muprior, dist.Distribution) else muprior(priorloc, priorscale)
+    mu_dist = muprior if isinstance(muprior, dist.Distribution) else muprior(priorscale)
     mu = numpyro.sample("mu", mu_dist)
     s = numpyro.deterministic("s", jnp.sqrt(2.0 * mu))
 
@@ -171,12 +175,21 @@ def lr_discrete_blockdiag(L_blocks=None, y_flat=None, n_blocks=None, block_size=
             Z_mix = numpyro.sample("Z_mix", dist.Normal(loc=loc_z, scale=scale_z))
 
     Z = Z_mix - (2.0 * p - 1.0) * mu
-    # Batched block matmul: Z @ L.T per block via einsum
-    Z_blocks = Z.reshape(n_blocks, block_size)
-    G_blocks = jnp.einsum('bi,bji->bj', Z_blocks, L_blocks)
-    G = numpyro.deterministic("G", G_blocks.reshape(-1))
 
-    numpyro.sample("y", dist.Bernoulli(logits=beta0 + G), obs=y_flat)
+    # Compute G for each block-size group; individuals are laid out
+    # consecutively in the order given by L_list / sizes.
+    G_parts = []
+    offset = 0
+    for L_s, block_size in zip(L_list, sizes):
+        n_s = L_s.shape[0]
+        n_inds = n_s * block_size
+        Z_s = Z[offset:offset + n_inds].reshape(n_s, block_size)
+        G_s = jnp.einsum('bi,bji->bj', Z_s, L_s).reshape(-1)
+        G_parts.append(G_s)
+        offset += n_inds
+
+    G = numpyro.deterministic("G", jnp.concatenate(G_parts))
+    numpyro.sample("y", dist.Bernoulli(logits=beta0 + G), obs=jnp.concatenate(y_list))
 
 
 # ---------------------------------------------------------------------

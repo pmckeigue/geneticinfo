@@ -40,20 +40,22 @@ print(f"  Number of blocks: {n_blocks}")
 print(f"  Block size:       {block_size}")
 print(f"  Reduction ratio:  {M_red/M_orig:.3f}")
 
-# Verify all blocks have the same size
-unique_sizes = set(block_sizes)
-assert len(unique_sizes) == 1, f"Non-uniform block sizes: {unique_sizes}"
+# Extract per-block Cholesky factors and group by size.
+# block_sizes lists the size of each block in the order they appear in L_red.
+from collections import defaultdict
+L_by_size = defaultdict(list)   # size -> list of (s,s) arrays
+y_by_size = defaultdict(list)   # size -> list of scalars
+ind_offset = 0
+y_offset   = 0
+for s in block_sizes:
+    L_by_size[s].append(L_red[ind_offset:ind_offset + s, ind_offset:ind_offset + s].copy())
+    y_by_size[s].extend(y_red[y_offset:y_offset + s].tolist())
+    ind_offset += s
+    y_offset   += s
 
-# Extract per-block Cholesky factors from the block-diagonal L_red
-L_blocks = np.zeros((n_blocks, block_size, block_size))
-offset = 0
-for i in range(n_blocks):
-    L_blocks[i] = L_red[offset:offset + block_size, offset:offset + block_size]
-    offset += block_size
-
-# Convert to JAX arrays
-L_blocks_jax = jnp.array(L_blocks, dtype=jnp.float64)
-y_flat_jax = jnp.array(y_red, dtype=jnp.float64)
+unique_sizes = sorted(L_by_size, reverse=True)   # largest first
+L_list = [jnp.array(np.stack(L_by_size[s]), dtype=jnp.float64) for s in unique_sizes]
+y_list = [jnp.array(y_by_size[s], dtype=jnp.float64) for s in unique_sizes]
 
 print(f"\n{'='*60}")
 print(f"lr_discrete_blockdiag with DiscreteHMCGibbs  (M_red={M_red})")
@@ -65,8 +67,7 @@ print(f"  Chains:           {num_chains}  (devices: {jax.device_count()})")
 mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
             num_chains=num_chains, chain_method="parallel")
 mcmc.run(random.PRNGKey(0),
-         L_blocks=L_blocks_jax, y_flat=y_flat_jax,
-         n_blocks=n_blocks, block_size=block_size, p_obs=p_obs)
+         L_list=L_list, y_list=y_list, sizes=unique_sizes, p_obs=p_obs)
 
 samples = mcmc.get_samples()
 mu_samples = samples["mu"]
