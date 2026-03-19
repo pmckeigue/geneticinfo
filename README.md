@@ -132,119 +132,87 @@ mcmc.print_summary()
 
 ### Overview
 
-An alternative Gibbs sampler is implemented in `pg_gibbs_vectorized.py` using the Pólya-gamma (PG) data-augmentation scheme of Polson, Scott and Windle (2013).  Introducing per-individual auxiliary variables ω_i ~ PG(1, |η_i|) renders the logistic likelihood conditionally Gaussian, enabling exact block Gibbs updates for all continuous latents.
+A CPU-based Gibbs sampler is implemented in `pg_gibbs_clean.py` using the Pólya-gamma (PG) data-augmentation scheme of Polson, Scott and Windle (2013).  The class `LRDiscreteBlockdiagPGGibbs` targets exactly the same model as `lr_discrete_blockdiag`.  Introducing per-individual auxiliary variables ω_i ~ PG(1, |η_i|) renders the logistic likelihood conditionally Gaussian, enabling exact block Gibbs updates for the continuous latents.
 
-The PG sampler:
+Each Gibbs step cycles over:
+
+1. **ω | η** — resample Pólya-gamma auxiliaries.
+2. **Z_mix | ω, y, φ, μ, r** — Gaussian draw per block (analytic Cholesky; size-2 blocks fully vectorised, no LAPACK calls).
+3. **r | Z_mix, φ** — exact Bernoulli draw: p(r_i = +1) = σ(Z_mix_i + φ).
+4. **φ | rest** — slice sampler on the PG-augmented log-posterior for φ = logit(p).
+5. **μ | ω, r, φ, y** — slice sampler on the *collapsed* log-posterior p(μ | ω, r, φ, y), which integrates out Z_mix analytically via an eigendecomposition of L^T diag(ω) L per block:
+
+```
+log p(θ | ω, r, φ, y) = log p(θ)
+  − ½ M log(2μ) − ¼ M μ                 ← Z_mix-prior normalisation
+  + const(ω, φ)                          ← offset-only quadratic in μ
+  + ½ Σ_j  [p0_j + μ·mbar·p1_j]² / (λ_j + τ)   ← collapsed quadratic form
+  − ½ Σ_j  log(λ_j + τ)                          ← log-det term
+```
+
+where τ = 1/(2μ), mbar = tanh(φ/2), λ_j are eigenvalues of the j-th block of L^T diag(ω) L, and p0_j, p1_j are the projections of the mu-independent and mu-dependent parts of the right-hand side onto the corresponding eigenvectors.
+
+6. **Z_mix** refreshed once more under the new μ.
+
+The sampler:
 
 - **Operates on M_rel relatives only** (singletons discarded), matching the data used by `DiscreteHMCGibbs`.
-- **Collapses both z and β₀ out analytically** when sampling μ: the θ log-posterior marginalises β₀ via a Schur correction, so the slice sampler evaluates the correct collapsed log-posterior p(θ | ω, r, y) in O(M_rel) time.
-- **Handles mixed block sizes** (pairs, triplets, …) with vectorised routines grouped by size.
-- **Runs on CPU** via `multiprocessing.Pool` with fork, with no JAX or GPU dependency.
-
-#### Collapsed β₀ update (Schur correction)
-
-The collapsed θ log-posterior marginalises β₀ jointly with z:
-
-```
-log p(θ | ω, r, y) = log p(θ)
-  + ½ Σ_b [b_b0^T A_b^{-1} b_b0 − log det A_b]   ← eigenvalue cache; b_b0 = L^T κ + ½r
-  + ½ β̄₀² s_schur − ½ log s_schur                ← Schur correction for β₀
-  − ¼ M_rel μ − ½ M_rel log(2μ)                   ← z-prior normalisation
-```
-
-where A_b = L_b^T diag(ω_b) L_b + τI, s_schur = Σ ω_i + 1/σ_β₀² − Σ_b g_b^T A_b^{-1} g_b, g_b = L_b^T ω_b, and β̄₀ = (Σ κ_i − Σ_b g_b^T A_b^{-1} b_b0) / s_schur.  The prior σ_β₀ ≈ 0.436 matches the logit effective standard deviation of Beta(10,10), matching `lr_discrete_blockdiag`'s p prior.
-
-#### Performance
-
-A key implementation detail: `np.dot` on arrays of length ~14,000 triggered OpenBLAS multi-thread wakeup (~50 ms per call) because the thread pool slept between Gibbs steps. Replacing three `np.dot` calls with element-wise `.sum()` operations (which bypass BLAS) reduced `sample_beta0_z_fast` from 54 ms to 1.1 ms per call, yielding a 38× overall speedup (3.8 → 145 iterations/second for M = 14,736).
+- **Handles mixed block sizes** (pairs, triplets, …) grouped by size for efficiency.
+- **Runs on CPU** via `multiprocessing.Pool` with fork; no JAX or GPU dependency.
 
 ### Running the example
 
 ```bash
-python run_pg_gibbs_simdata.py
+python run_comparison.py
 ```
 
-This simulates a large case-control dataset with full-sib pairs, full-sib triplets, and half-sib pairs; plots genotypic-value densities in cases vs controls; builds the block structure; and runs 4 chains in parallel.
-
-#### Simulated dataset (× 2 population)
-
-```
-=== Population ===
-  Total individuals:        1,484,000
-    Full-sib pairs:           400,000
-    Full-sib triplets:        200,000
-    Half-sib pairs:            40,000
-    Unrelated:                  4,000
-
-=== Case-control sample ===
-  Sample size M:          29,496
-    Cases:                14,748
-    Controls:             14,748
-  Related individuals (block size >= 2):  1,120
-  Blocks: 557 pairs + 2 triplets
-```
-
-#### Posterior summary (4 chains, 1000 warmup + 5000 samples, CPU)
-
-```
-  mu: mean=0.760  median=0.752  sd=0.245  90%CI=[0.375,1.184]  ESS_bulk=674  r_hat=1.000
-```
-
-True value: μ = 1.00.  90% CI [0.375, 1.184] contains the true value.  Wall time: ~30 s on CPU (4 cores, M_rel = 1120).
+This simulates a large case-control dataset with full-sib pairs, full-sib triplets, and half-sib pairs; builds the shared block structure; runs both `LRDiscreteBlockdiagPGGibbs` and `DiscreteHMCGibbs` on identical data; and prints a side-by-side comparison.
 
 ---
 
 ## Comparison on the same dataset
 
-Both algorithms were run on the same case-control sample (seed = 42) from the population described above (1,484,000 individuals; 400k full-sib pairs, 200k full-sib triplets, 40k half-sib pairs, 4k unrelated; K = 0.01, true μ = 1.0).  The script `run_comparison.py` simulates once and passes the same block structure to both samplers.
+Both algorithms were run on the same case-control sample (seed = 42) simulated from a population of 1,484,000 individuals (400k full-sib pairs, 200k full-sib triplets, 40k half-sib pairs, 4k unrelated; K = 0.01, true μ = 2.0).  The script `run_comparison.py` simulates once and passes the same block structure to both samplers.
 
 **Data summary**
 
 ```
-M = 29,496  (14,748 cases, 14,748 controls)
-Related individuals (block size ≥ 2):  1,120
-  Blocks: 557 pairs + 2 triplets
+M = 29,522  (14,761 cases, 14,761 controls)
+Related individuals (block size ≥ 2):  M_rel = 1,374
+  Blocks: 672 pairs + 10 triplets
 ```
 
-Both algorithms now operate on M_rel = 1,120 relatives only: 557 size-2 (pair) blocks and 2 size-3 (triplet) blocks.  PG-Gibbs marginalises β₀ analytically in the θ update (Schur correction) using the same informative prior as `lr_discrete_blockdiag` (σ_β₀ ≈ 0.436, matching Beta(10,10)→logit).
+Both algorithms operate on M_rel = 1,374 relatives only.
 
-**Results (true μ = 1.0)**
+**Results (true μ = 2.0)**
 
 ```
 Algorithm             median     sd     90% CI          ESS    r_hat   wall time
-PG-Gibbs              0.752   0.245  [0.375, 1.184]    674    1.000       30 s  (CPU, 4 cores)
-DiscreteHMCGibbs      0.958   0.382  [0.472, 1.705]    459    1.010      363 s  (GPU, 4×Tesla V100)
+PG-Gibbs               2.167   0.993  [1.253, 4.230]    189    1.030       87 s  (CPU, 4 cores)
+DiscreteHMCGibbs        2.134   0.889  [1.259, 3.937]    250    1.020      416 s  (GPU, 4×Tesla V100)
 ```
 
-Both 90% credible intervals contain the true value μ = 1.0.
+Both 90% credible intervals contain the true value μ = 2.0.  The posterior medians agree closely (2.167 vs 2.134).
 
 ![Prior, posterior and likelihood for both algorithms](comparison_prior_posterior_likelihood.png)
 
-**Interpretation.**  The two posteriors overlap substantially.  Several factors contribute to the remaining difference (PG-Gibbs median 0.752 vs DiscreteHMCGibbs median 0.958):
-
-- *Intercept handling.*  In `lr_discrete_blockdiag`, β₀ = logit(p) is a deterministic function of the mixing proportion (one degree of freedom), with p ~ Beta(10,10).  In PG-Gibbs, β₀ and p_mix are sampled as separate parameters: β₀ from its Gaussian conditional via Schur complement, and p_mix from a Beta posterior.  This residual difference in model specification produces a slight shift.
-
-- *Mixing.*  The PG-Gibbs IAT ≈ 37 (20,000 samples / ESS 674) vs DiscreteHMCGibbs IAT ≈ 17 (8,000 samples / ESS 459), reflecting somewhat slower mixing in the collapsed θ update.
-
-- *Posterior concentration.*  With K = 0.01 and 1:1 case-control matching, most relative pairs in the sample are discordant, carrying less information about λ_S than concordant-affected pairs.  The half-Cauchy(1) prior has considerable influence on both posteriors.
-
 ## Algorithm comparison
 
-| Feature | DiscreteHMCGibbs | PG-Gibbs |
+| Feature | DiscreteHMCGibbs | PG-Gibbs (`LRDiscreteBlockdiagPGGibbs`) |
 |---|---|---|
 | Framework | NumPyro / JAX | NumPy (pure CPU) |
 | Hardware | GPU (4 × Tesla V100) | CPU (4 cores) |
 | Individuals used | M_rel only (singletons discarded) | M_rel only (singletons discarded) |
 | Mixed block sizes | Yes (L_list/y_list/sizes interface) | Yes (pairs, triplets, … grouped by size) |
-| Discrete latents r_i | Exact enumeration via DiscreteHMCGibbs | Exact enumeration per block (collapsed for θ) |
-| Continuous update | NUTS (joint μ, s, β₀) | Slice sampler on θ = log μ with Schur-collapsed β₀; Gaussian draw for β₀, z |
-| β₀ prior | logit(p), p ~ Beta(10,10) | N(0, σ²), σ ≈ 0.436; marginalised in θ update |
-| Prior on μ | Half-Cauchy(1) | Half-Cauchy(1) |
-| μ posterior median (true = 1.0) | 0.958 | 0.752 |
-| μ 90% CI | [0.472, 1.705] | [0.375, 1.184] |
-| ESS (bulk) | 459 from 8,000 samples | 674 from 20,000 samples |
-| IAT | ~17 | ~37 |
-| Wall time (same dataset) | 363 s | 30 s |
+| Discrete latents r_i | Exact enumeration via DiscreteHMCGibbs | Exact Bernoulli given Z_mix |
+| Continuous update | NUTS (joint μ, φ, Z) | Slice on μ (collapsed Z_mix); Gaussian draw for Z_mix |
+| φ = logit(p) prior | p ~ Beta(20·p_obs, 20·(1−p_obs)) | same (K_beta = 20) |
+| Prior on μ | Half-Cauchy(2) | Half-Cauchy(2) |
+| μ posterior median (true = 2.0) | 2.134 | 2.167 |
+| μ 90% CI | [1.259, 3.937] | [1.253, 4.230] |
+| ESS (bulk) | 250 from 8,000 samples | 189 from 20,000 samples |
+| IAT | ~32 | ~106 |
+| Wall time (same dataset) | 416 s | 87 s |
 
 ---
 
@@ -253,11 +221,12 @@ Both 90% credible intervals contain the true value μ = 1.0.
 | File | Description |
 |---|---|
 | `geneticinfo.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
-| `pg_gibbs_vectorized.py` | Vectorised PG-Gibbs sampler: grouped block operations, collapsed θ update |
+| `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs` sampler: exact match to `lr_discrete_blockdiag` model; `PGGibbsBlockSampler` reference implementation |
+| `pg_gibbs_vectorized.py` | Earlier vectorised PG-Gibbs sampler: grouped block operations, collapsed θ update |
 | `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |
+| `run_comparison.py` | Run both algorithms on the same simulated dataset; print side-by-side summary and save plot |
 | `run_pg_gibbs_simdata.py` | PG-Gibbs on `simulate_casecontrol_related()` dataset; plots genotypic densities |
 | `run_pg_gibbs_create_data.py` | PG-Gibbs on `create_data()` small dataset |
-| `run_comparison.py` | Run both algorithms on the same simulated dataset; print side-by-side summary |
 | `test_discrete_gibbs_large.py` | End-to-end DiscreteHMCGibbs: simulate, reduce, fit, plot |
 | `pg_gibbs_report.md` / `.pdf` | Detailed technical report with model description and results |
 
