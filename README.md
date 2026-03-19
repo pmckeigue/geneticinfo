@@ -172,12 +172,27 @@ This simulates a large case-control dataset with full-sib pairs, full-sib triple
 
 ## Comparison on the same dataset
 
-Both algorithms were run on the same case-control sample (seed = 42) simulated from a population of 1,484,000 individuals (400k full-sib pairs, 200k full-sib triplets, 40k half-sib pairs, 4k unrelated; K = 0.01, true μ = 2.0).  The script `run_comparison.py` simulates once and passes the same block structure to both samplers.
+Both algorithms were run on the same case-control sample (seed = 42).  The script `run_comparison.py` simulates once and passes the same block structure to both samplers.
 
-**Data summary**
+**Simulated population**
+
+```
+Total individuals:        1,484,000
+  Full-sib pairs:           400,000   (genetic correlation 0.5)
+  Full-sib triplets:        200,000   (genetic correlation 0.5)
+  Half-sib pairs:            40,000   (genetic correlation 0.25)
+  Unrelated:                  4,000
+Prevalence K = 0.01,  true μ = 2.0  (λ_S = exp(μ) ≈ 7.39)
+```
+
+**Case-control sample**
 
 ```
 M = 29,522  (14,761 cases, 14,761 controls)
+Full-sib pairs (both sampled):    283  (166 concordant-affected)
+Triplet sib-pairs (both sampled): 400  (241 case-case, 107 discordant, 52 ctrl-ctrl)
+Half-sib pairs (both sampled):     19
+
 Related individuals (block size ≥ 2):  M_rel = 1,374
   Blocks: 672 pairs + 10 triplets
 ```
