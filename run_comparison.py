@@ -21,7 +21,7 @@ import arviz as az
 from tqdm import tqdm
 
 # ── simulation parameters ────────────────────────────────────────────────────
-MU_TRUE          = 1.0
+MU_TRUE          = 2.0
 K                = 0.01
 SEED_DATA        = 42
 N_FULLSIB_PAIRS  = 400_000
@@ -48,6 +48,7 @@ M = info["M"]
 # ── 2. Build shared block structure ──────────────────────────────────────────
 from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
 from pg_gibbs_vectorized import GroupedBlocks, _worker_preloaded
+from pg_gibbs_clean import _worker_preloaded_scratch, _worker_preloaded_lrpg
 
 L_np = np.asarray(L_sample, dtype=np.float64)
 y_np = np.asarray(y_sample, dtype=np.float64)
@@ -92,6 +93,33 @@ print(f"  Relatives-only GroupedBlocks: M={gb_rel.M}  "
       + "  ".join(f"size-{s}:{gb_rel.L_by_size[s].shape[0]}" for s in gb_rel.sizes))
 
 
+def dense_from_groupedblocks(gb) -> np.ndarray:
+    L = np.zeros((gb.M, gb.M), dtype=np.float64)
+    for s in gb.sizes:
+        Ls = gb.L_by_size[s]                            # (n_s,s,s)
+        idx = gb.idx_by_size[s].reshape(-1, s)          # (n_s,s)
+        for b in range(Ls.shape[0]):
+            sl = idx[b]
+            L[np.ix_(sl, sl)] = Ls[b]
+    return L
+
+# Build block object used by scratch sampler
+from pg_gibbs_vectorized_clean import blockdiag_from_groupedblocks
+Lblk_rel = blockdiag_from_groupedblocks(gb_rel)
+
+# Dense matrix for checking
+L_dense_rel = dense_from_groupedblocks(gb_rel)
+
+rng_check = np.random.default_rng(0)
+v = rng_check.normal(size=gb_rel.M)
+
+err = np.max(np.abs(L_dense_rel.T @ v - Lblk_rel.Lt_vec(v)))
+print("Lt_vec max abs err (relatives):", err)
+assert err < 1e-10
+
+
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ALGORITHM 1: PG-Gibbs  (M_rel relatives only; β₀ marginalised in θ update)
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -110,15 +138,15 @@ cfg_pg = ChainConfig(
     n_warmup=1000, n_samples=5000,
     prior_loc=0.0, prior_scale=1.0,
     beta0_sd=BETA0_SD_REL, slice_w=1.5, slice_m=20, slice_max_steps=250,
-    inner_latent_cycles=1, learn_p=True, p_prior_conc=20.0,
-    project_affects_beta0=True, diag_every=200, data_flag=True,
+    inner_latent_cycles=2, learn_p=True, p_prior_conc=20.0,
+    project_affects_beta0=False, diag_every=200, data_flag=True,
 )
 # Use gb_rel (M_rel relatives only) with p0_override=p_obs (full-sample case
 # rate) to centre the Beta prior at 0.5, and collapse_beta0=True to
 # marginalise β₀ analytically in the θ log-posterior.
 p_obs_full = float(np.mean(y_sample))
 jobs_pg = [(cid, gb_rel, y_rel, 42 + cid, cfg_pg, MU_TRUE,
-            p_obs_full, False, True)   # p0_override, fix_beta0_to_pmix, collapse_beta0
+            p_obs_full, False, False)   # p0_override, fix_beta0_to_pmix, collapse_beta0
            for cid in range(NUM_CHAINS_PG)]
 
 t0_pg = time.perf_counter()
@@ -126,7 +154,7 @@ ctx  = mp.get_context("fork")
 lock = ctx.RLock()
 with ctx.Pool(processes=NUM_CHAINS_PG,
               initializer=tqdm.set_lock, initargs=(lock,)) as pool:
-    chains_pg = pool.map(_worker_preloaded, jobs_pg)
+    chains_pg = pool.map(_worker_preloaded_lrpg, jobs_pg)
 t_pg = time.perf_counter() - t0_pg
 
 mu_pg = np.concatenate([o["mu"] for o in chains_pg])
