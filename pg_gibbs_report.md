@@ -1,6 +1,6 @@
 ---
 title: "Bayesian Inference of Genetic Information for Disease Discrimination"
-subtitle: "Pólya-gamma Gibbs Sampler for a Logistic Mixture Model with Family Structure"
+subtitle: "Pólya-gamma Gibbs Sampler Targeting the lr_discrete_blockdiag Model"
 date: "March 2026"
 geometry: margin=2.5cm
 fontsize: 11pt
@@ -26,7 +26,7 @@ The goal is to infer $\mu$ from a case-control dataset in which some sampled ind
 Let $\mathbf{y} \in \{0,1\}^M$ denote case-control status for $M$ individuals and let $\Phi = LL^\top$ be the Cholesky decomposition of the GRM.  The model is a logistic regression with a two-component mixture random effect:
 
 $$
-\mu \;\sim\; \mathrm{HalfCauchy}(1), \qquad \beta_0 \;\sim\; \mathcal{N}(0,\, 25), \qquad p \;\sim\; \mathrm{Beta}(a_0,b_0)
+\mu \;\sim\; \mathrm{HalfCauchy}(2), \qquad \phi = \mathrm{logit}(p) \;\sim\; \mathcal{N}(0,\, \sigma_\phi^2), \qquad p \;\sim\; \mathrm{Beta}(20\,p_{\mathrm{obs}},\; 20\,(1-p_{\mathrm{obs}}))
 $$
 
 For each individual $i = 1, \ldots, M$:
@@ -35,35 +35,26 @@ $$
 r_i \mid p \;\sim\; 2\,\mathrm{Bernoulli}(p) - 1 \;\in\; \{-1,+1\},
 $$
 $$
-z_i \mid r_i,\mu \;\sim\; \mathcal{N}(r_i\,\mu,\; 2\mu),
+Z_{\mathrm{mix},i} \mid r_i,\mu \;\sim\; \mathcal{N}(r_i\,\mu,\; 2\mu),
 $$
 $$
-G_i \;=\; (L\mathbf{z})_i \quad \text{(correlated genotypic value)},
-$$
-$$
-\eta_i \;=\; \beta_0 + G_i,
+\eta_i \;=\; \phi + (L\mathbf{Z}_{\mathrm{mix}})_i - \bar\Delta\,(L\mathbf{1})_i, \qquad \bar\Delta = (2p-1)\,\mu,
 $$
 $$
 y_i \mid \eta_i \;\sim\; \mathrm{Bernoulli}\!\left(\sigma(\eta_i)\right), \quad \sigma(x) = (1+e^{-x})^{-1}.
 $$
 
-The binary indicator $r_i$ determines the class ($+1 =$ genetic risk carrier, $-1 =$ non-carrier); the mixture proportion $p$ is estimated jointly and tracks the population prevalence $K$.  The Cholesky factor $L$ is block-diagonal, with one block per connected family cluster; unrelated individuals appear as $1\times 1$ singleton blocks.
+The binary indicator $r_i$ determines the class ($+1 =$ genetic risk carrier, $-1 =$ non-carrier); the mixing proportion $p$ estimates the population prevalence $K$.  The Cholesky factor $L$ is block-diagonal, one block per connected family cluster.  The shift $\bar\Delta(L\mathbf{1})_i$ centres the logit on the marginal mean of $Z_{\mathrm{mix}}$.
 
-The theoretical relationship $\mu = \tfrac{1}{2}s^2$ (variance equals twice the mean for the genotypic-value distribution) is enforced through the parameterisation $z_i \mid r_i, \mu \sim \mathcal{N}(r_i\mu, 2\mu)$, so that the marginal distribution of $G_i$ for a single unrelated individual is
+The theoretical constraint $\mu = \tfrac{1}{2}s^2$ (variance equals twice the mean for the genotypic value) is enforced through the parameterisation $Z_{\mathrm{mix},i} \mid r_i, \mu \sim \mathcal{N}(r_i\mu, 2\mu)$, so the marginal genotypic-value distribution is
 
 $$
-G_i \;\sim\; \tfrac{1}{2}\,\mathcal{N}(\mu,\, 2\mu) \;+\; \tfrac{1}{2}\,\mathcal{N}(-\mu,\, 2\mu).
+(L\mathbf{Z}_{\mathrm{mix}})_i \;\sim\; \tfrac{1}{2}\,\mathcal{N}(\mu,\, 2\mu) \;+\; \tfrac{1}{2}\,\mathcal{N}(-\mu,\, 2\mu).
 $$
 
-## Directed acyclic graph
+## Reduction to relatives
 
-Figure 1 shows the plate diagram for the model.  Shaded blue circles are stochastic parameters; the orange rectangle is fixed observed data; the green circle is the observed outcome; double-bordered rectangles are deterministic functions.  The plate encloses the $M$ per-individual variables.  The coupling between individuals within the same family enters through the linear map $G = Lz$, so $G_i$ depends on all $z_j$ within the same family block.
-
-\begin{figure}[H]
-\centering
-\includegraphics[width=0.45\textwidth]{dag_pgibbs.png}
-\caption{Plate diagram for the logistic mixture model.  $\mu$: genetic information (nats); $\beta_0$: intercept; $p$: mixing proportion; $r_i$: class indicator; $z_i$: standardised genotypic component; $G_i$: correlated genotypic value; $\eta_i$: log-odds; $y_i$: observed case/control status; $L$: Cholesky factor of the genetic relationship matrix.}
-\end{figure}
+Unrelated individuals (singletons in the GRM) contribute no information about $\lambda_S$: their $Z_{\mathrm{mix}}$ terms do not covary with any other individual, so after marginalising $Z_{\mathrm{mix}}$ the likelihood factors for singletons are flat in $\mu$.  All singletons are therefore discarded before fitting, retaining only the $M_{\mathrm{rel}} \ll M$ individuals in family blocks of size $\geq 2$.
 
 # Pólya-gamma Gibbs Sampler
 
@@ -75,150 +66,112 @@ $$
 \kappa_i \mid \omega_i,\eta_i \;\sim\; \mathcal{N}\!\left(\omega_i\,\eta_i,\; \omega_i^{-1}\right), \qquad \kappa_i = y_i - \tfrac{1}{2}.
 $$
 
-Given $\boldsymbol\omega$, the joint distribution of $(\beta_0, \mathbf{z})$ is Gaussian, enabling exact block updates.
-
-## Collapsed $\theta$ update
-
-The primary inferential target is $\mu$.  Sampling is performed on the log scale $\theta = \log\mu$, using a univariate slice sampler for $p(\theta \mid \boldsymbol\omega, \mathbf{r}, \mathbf{y})$.  The latent $\mathbf{z}$ is integrated out analytically: for each family block $b$ of size $s_b$, the precision matrix of $\mathbf{z}_b$ given $\boldsymbol\omega_b$, $\beta_0$, and $\mathbf{r}_b$ is
-
-$$
-A_b = L_b^\top \operatorname{diag}(\boldsymbol\omega_b) L_b + \tau I_{s_b}, \quad \tau = \tfrac{1}{2\mu},
-$$
-
-and the resulting eigenvalue decomposition yields the log-posterior contribution
-
-$$
-\log p(\theta \mid \cdots) \;\propto\; \tfrac{1}{2}\sum_b \left[\mathbf{b}_b^\top A_b^{-1}\mathbf{b}_b - \log\det A_b\right]
-- \tfrac{1}{4} M_{\mathrm{rel}}\,\mu - \tfrac{1}{2} M_{\mathrm{rel}}\log(2\mu) + \log p(\mu),
-$$
-
-where $\mathbf{b}_b = L_b^\top(\boldsymbol\kappa_b - \boldsymbol\omega_b\beta_0) + \tfrac{1}{2}\mathbf{r}_b$ and $M_{\mathrm{rel}}$ counts only individuals in family blocks of size $\geq 2$.
-
-**Singleton exclusion.** The terms $-\tfrac{1}{4}M\mu - \tfrac{1}{2}M\log(2\mu)$ arise from the $z$-prior normalisation $p(\mathbf{z} \mid \mu, \mathbf{r})$.  For singleton (unrelated) individuals these terms impose a large penalty on large $\mu$ without carrying any information about $\lambda_S$, causing severe downward bias when $M$ is large relative to $M_{\mathrm{rel}}$.  The fix is to restrict the sum in the collapsed log-posterior to blocks of size $\geq 2$, so that only the $M_{\mathrm{rel}}$ related individuals contribute to the $\mu$ likelihood.
+Given $\boldsymbol\omega$, the full conditional of $\mathbf{Z}_{\mathrm{mix}}$ is Gaussian with precision matrix $L^\top\operatorname{diag}(\boldsymbol\omega)L + \tau I$ (where $\tau = 1/(2\mu)$ from the Gaussian prior) and a linear right-hand side.
 
 ## Full Gibbs sweep
 
-Each outer iteration performs the following steps:
+The `LRDiscreteBlockdiagPGGibbs` sampler performs the following steps each iteration:
 
 1. **Sample $\boldsymbol\omega$:** $\omega_i \mid \eta_i \sim \mathrm{PG}(1, |\eta_i|)$, implemented via the `polyagamma` C extension.
-2. **Build Cholesky / likelihood factors** per block size (vectorised).
-3. **Sample $\mathbf{r}$:** collapsed exact enumeration of $2^{s_b}$ states per block (vectorised for singletons and pairs; fallback for larger blocks).
-4. **Sample $(\beta_0, \mathbf{z})$:** joint Gaussian draw via the Schur complement, with a constraint $\sum_i z_i = 0$ to remove the intercept-$z$ non-identifiability.
-5. **Sample $c$, re-sample $\mathbf{r}$:** update the within-mixture scale $c$ (Gibbs), then redraw $\mathbf{r}$ from the full conditional given $\mathbf{z}$.
-6. **Sample $p$:** conjugate Beta update.
-7. **Sample $\theta$:** univariate slice sampler on the collapsed eigenvalue cache (blocks of size $\geq 2$ only).
 
-## Prior
-
-The half-Cauchy prior $\mu \sim \mathrm{HalfCauchy}(1)$ is used throughout.  In the $\theta = \log\mu$ parameterisation the log-prior (including the Jacobian) is
-
+2. **Sample $\mathbf{Z}_{\mathrm{mix}}$:** joint Gaussian draw for each family block $b$,
 $$
-\log p(\theta) = \theta - \log\!\left[1 + e^{2\theta}\right] + \mathrm{const},
+\mathbf{Z}_{\mathrm{mix},b} \mid \boldsymbol\omega_b, \kappa_b, \phi, \mu, \mathbf{r}_b \;\sim\; \mathcal{N}(A_b^{-1}\mathbf{b}_b,\; A_b^{-1}),
+$$
+where $A_b = L_b^\top\operatorname{diag}(\boldsymbol\omega_b)L_b + \tau I$ and $\mathbf{b}_b = L_b^\top(\boldsymbol\kappa_b - \boldsymbol\omega_b c_b) + \tfrac{1}{2}\mathbf{r}_b$, with $c_b = \phi - \bar\Delta v_b$ the per-individual offset and $v_b = (L_b\mathbf{1})_b$.  For size-2 blocks the Cholesky solve is fully vectorised without LAPACK calls.
+
+3. **Sample $\mathbf{r}$:** exact Bernoulli draw per individual,
+$$
+p(r_i = +1 \mid Z_{\mathrm{mix},i}, \phi) = \sigma(Z_{\mathrm{mix},i} + \phi).
 $$
 
-which has a mode at $\theta = 0$ ($\mu = 1$) and heavy tails.  This prior is uninformative over a wide range of $\mu$ while providing regularisation against extreme values.
+4. **Sample $\phi$:** univariate slice sampler on the PG-augmented log-posterior,
+$$
+\log p(\phi \mid \boldsymbol\omega, \mathbf{Z}_{\mathrm{mix}}, \mathbf{r}, \mathbf{y}) \;\propto\; \boldsymbol\kappa^\top\boldsymbol\eta(\phi) - \tfrac{1}{2}\boldsymbol\omega^\top\boldsymbol\eta(\phi)^2 + (a-1)\log p + (b-1)\log(1-p) + n_+\log p + n_-\log(1-p),
+$$
+where $n_+, n_-$ are the current counts of $r_i = +1$ and $r_i = -1$, and $a = 20\,p_{\mathrm{obs}}$, $b = 20(1-p_{\mathrm{obs}})$ are the Beta prior parameters.
 
-# Vectorised Implementation and Performance
+5. **Sample $\mu$ (collapsed):** slice sampler on the log-posterior $p(\theta \mid \boldsymbol\omega, \mathbf{r}, \phi, \mathbf{y})$ with $\theta = \log\mu$, marginalising $\mathbf{Z}_{\mathrm{mix}}$ analytically.  For each family block $b$ the eigendecomposition $A_b = U_b\operatorname{diag}(\boldsymbol\lambda_b)U_b^\top$ yields
+$$
+\log p(\theta \mid \cdots) \;\propto\; \log p(\theta) - \tfrac{1}{2}M_{\mathrm{rel}}\log(2\mu) - \tfrac{1}{4}M_{\mathrm{rel}}\mu + C(\boldsymbol\omega,\phi,\mu) + \tfrac{1}{2}\sum_b\sum_j \frac{(p_{0,bj} + \mu\,\bar m\,p_{1,bj})^2}{\lambda_{bj}+\tau} - \tfrac{1}{2}\sum_b\sum_j\log(\lambda_{bj}+\tau),
+$$
+where $\bar m = \tanh(\phi/2)$, $\tau = 1/(2\mu)$, $p_{0,bj} = (U_b^\top\mathbf{b}_{0,b})_j$, $p_{1,bj} = (U_b^\top\mathbf{b}_{1,b})_j$ are projections of the $\mu$-independent and $\mu$-dependent parts of the right-hand side onto the eigenvectors, and $C(\boldsymbol\omega,\phi,\mu)$ collects the offset-only quadratic terms.
 
-## Block-grouped operations
+6. **Refresh $\mathbf{Z}_{\mathrm{mix}}$:** repeat step 2 under the updated $\mu$ to improve mixing.
 
-The $M$ individuals are partitioned into groups by family-block size $s$.  Singletons ($s=1$, typically $\gg 90$% of observations), pairs ($s=2$), triplets ($s=3$), and larger blocks are handled by separate vectorised routines:
+## Prior on $\mu$
 
-- **Singletons ($s=1$):** all scalar arithmetic is batched into single NumPy array operations.
-- **Pairs ($s=2$):** the four possible $\mathbf{r}$ states are enumerated simultaneously for all pairs using batched $2\times 2$ analytic Cholesky factors; eigensystem of the $2\times 2$ precision matrix is computed analytically.
-- **Larger blocks:** general NumPy/SciPy fallback (per-block Python loop).
+The half-Cauchy prior $\mu \sim \mathrm{HalfCauchy}(2)$ is used throughout.  In the $\theta = \log\mu$ parameterisation the log-prior (including the Jacobian) is
 
-## Performance optimisation: BLAS thread cold-start
+$$
+\log p(\theta) = \theta - \log\!\left[1 + \left(e^\theta/2\right)^2\right] + \mathrm{const},
+$$
 
-Profiling on the larger simulated datasets ($M \approx 14{,}000$) identified an unexpected bottleneck in `sample_beta0_z_fast`: three calls to `np.dot(g, ig)` on arrays of $n \approx 14{,}000$ elements each took $\approx 50\,\mathrm{ms}$ per call, for a total of $\approx 150\,\mathrm{ms}$ per Gibbs iteration — the dominant cost.
-
-The cause was the OpenBLAS DDOT routine: at $n \approx 14{,}000$, OpenBLAS elected to use multiple threads.  Because $\approx 50\,\mathrm{ms}$ elapsed between consecutive dot-product calls (other Gibbs steps), the BLAS thread pool fell asleep and incurred a cold-start wakeup cost on every call.  For smaller ($n \leq 10{,}000$) or larger ($n \geq 50{,}000$) arrays, OpenBLAS used a single thread or had sufficient parallel efficiency, respectively, and was fast.
-
-The fix was to replace the three `np.dot` calls with equivalent element-wise operations that bypass BLAS:
-
-```python
-# Before (50 ms each at n ~ 14 000):
-gT_invg += float(np.dot(g, ig))   # BLAS ddot -> thread cold-start
-gT_invb += float(np.dot(g, ib))
-gT_inv1 += float(np.dot(g, i1))
-
-# After (< 0.1 ms total):
-gT_invg += float((g * ig).sum())  # NumPy element-wise; no BLAS
-gT_invb += float((bz * ig).sum())
-gT_inv1 += float(ig.sum())
-```
-
-This reduced `sample_beta0_z_fast` from 54 ms to 1.1 ms (49× speedup), and overall sampler throughput increased from 3.8 to 145 iterations/second on four parallel chains (38× speedup).
+which is flat around $\theta = 0$ ($\mu = 1$) and provides regularisation against extreme values.
 
 # Simulation Study
 
-## Dataset generation
+## Simulated population and case-control sample
 
-Datasets were simulated under the generative model with true $\mu = 1.0$ (so $\lambda_S = e \approx 2.718$) and disease prevalence $K = 0.01$.  A case-control sample was drawn by sampling all cases from the population plus an equal number of controls (1:1 matching).  Related individuals (full-sib pairs, full-sib triplets, half-sib pairs) were included in the population; a random subset of both members of each family was included in the case-control sample when both were ascertained.
-
-Table 1 summarises the three datasets analysed.
+The generative model was simulated with true $\mu = 2.0$ ($\lambda_S = e^2 \approx 7.39$) and disease prevalence $K = 0.01$.  The population comprised 400,000 full-sib pairs (genetic correlation 0.5), 200,000 full-sib triplets (genetic correlation 0.5), 40,000 half-sib pairs (genetic correlation 0.25), and 4,000 unrelated individuals (1,484,000 total).  A 1:1 case-control sample retained all 14,761 cases and an equal number of controls.
 
 \begin{table}[H]
 \centering
-\caption{Simulated datasets.  $M$: total case-control sample size; $M_{\mathrm{rel}}$: individuals in related pairs or larger blocks; true $\mu = 1.0$ throughout.}
-\begin{tabular}{lrrrl}
+\caption{Case-control sample characteristics (seed = 42, true $\mu = 2.0$, $K = 0.01$).}
+\begin{tabular}{lr}
 \toprule
-Dataset & $M$ & $M_{\mathrm{rel}}$ & Related blocks & Notes \\
+Quantity & Count \\
 \midrule
-\texttt{create\_data()} & 3,294 & 114 & 57 full-sib pairs & Small, for development \\
-Simulated ($\times$1) & 14,736 & 502 & 251 pairs & 200k + 100k + 20k fam.\ \\
-Simulated ($\times$2) & 29,496 & 1,120 & 557 pairs + 2 triplets & Doubled population \\
+Total sample $M$ & 29,522 \\
+Cases / Controls & 14,761 / 14,761 \\
+Full-sib pairs (both sampled) & 283 \\
+\quad of which concordant-affected & 166 \\
+Triplet sib-pairs (both sampled) & 400 \\
+\quad concordant case-case & 241 \\
+\quad discordant & 107 \\
+\quad concordant ctrl-ctrl & 52 \\
+Half-sib pairs (both sampled) & 19 \\
+\midrule
+$M_{\mathrm{rel}}$ (block size $\geq 2$) & 1,374 \\
+\quad Size-2 blocks (pairs) & 672 \\
+\quad Size-3 blocks (triplets) & 10 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-Each analysis ran 4 independent chains with 1,000 warm-up and 5,000 post-warm-up samples (10,000 for `create_data()`), using `multiprocessing.Pool` with `fork` context.
+## Comparison with DiscreteHMCGibbs
 
-## Results
-
-Table 2 summarises posterior inference for $\mu$ across all three datasets.
+The `LRDiscreteBlockdiagPGGibbs` sampler was compared with NumPyro's `DiscreteHMCGibbs` (NUTS inner kernel, `modified=True`) on the same data.  Both algorithms operated on the same $M_{\mathrm{rel}} = 1{,}374$ relatives.  Four chains were run for each algorithm.
 
 \begin{table}[H]
 \centering
-\caption{Posterior summaries for $\mu$ (true value: 1.0).  ESS: effective sample size (bulk); $\hat{R}$: Gelman-Rubin statistic.}
-\begin{tabular}{lrrrrrrr}
+\caption{Posterior summaries for $\mu$ (true value: 2.0).  ESS: effective sample size (bulk); $\hat{R}$: Gelman-Rubin statistic.}
+\begin{tabular}{lrrrrrrrr}
 \toprule
-Dataset & $M$ & Median & Mean & SD & 90\% CI & ESS & $\hat{R}$ \\
+Algorithm & Warmup & Samples & Median & SD & 90\% CI & ESS & $\hat{R}$ & Wall time \\
 \midrule
-\texttt{create\_data()} & 3,294 & -- & -- & -- & [0.42,\;1.44] & 293 & 1.01 \\
-Simulated ($\times$1) & 14,736 & 0.596 & 0.614 & 0.292 & [0.163,\;1.130] & 1,077 & 1.00 \\
-Simulated ($\times$2) & 29,496 & 0.624 & 0.632 & 0.219 & [0.291,\;1.006] & 1,027 & 1.00 \\
+PG-Gibbs & 1,000 & 5,000 & 2.167 & 0.993 & [1.253,\;4.230] & 189 & 1.030 & 87 s \\
+DiscreteHMCGibbs & 2,000 & 2,000 & 2.134 & 0.889 & [1.259,\;3.937] & 250 & 1.020 & 416 s \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-## Computational performance
+The posterior medians agree closely (2.167 vs 2.134) and both 90% credible intervals contain the true value $\mu = 2.0$.  The PG-Gibbs sampler is approximately 5× faster in wall time (87 s vs 416 s) on CPU versus GPU respectively, at a cost of lower ESS per sample due to slower mixing.
 
-\begin{table}[H]
-\centering
-\caption{Sampler throughput (4 parallel chains, wall-clock time includes simulation and block-structure construction).}
-\begin{tabular}{lrrr}
-\toprule
-Dataset & $M$ & Throughput (it/s) & Wall time \\
-\midrule
-Simulated ($\times$1) & 14,736 & 145 & 43 s \\
-Simulated ($\times$2) & 29,496 & 65 & 1 min 43 s \\
-\bottomrule
-\end{tabular}
-\end{table}
+![Prior, posterior and likelihood for both algorithms on the same dataset.](comparison_prior_posterior_likelihood.png)
 
-Throughput scales approximately as $M^{-1}$, consistent with the dominant $O(M)$ Pólya-gamma sampling step.
+## Discussion
 
-# Discussion
+**Agreement between samplers.**  The close agreement in posterior medians (difference $< 2\%$) and overlapping credible intervals confirm that `LRDiscreteBlockdiagPGGibbs` is targeting the same posterior as `DiscreteHMCGibbs`.  The wider credible interval from PG-Gibbs (width 2.977 vs 2.678) reflects somewhat slower mixing (IAT $\approx 106$ vs $\approx 32$).
 
-The posterior credible intervals for $\mu$ contain the true value in all analyses, confirming that the sampler is correctly targeting the posterior.  The posterior median is consistently below the true value $\mu = 1.0$.  Several factors contribute to this:
+**Information content.**  With $K = 0.01$ and 1:1 case-control matching, most relative pairs in the sample are discordant, carrying less information about $\lambda_S$ than concordant-affected pairs.  The half-Cauchy(2) prior retains considerable influence with $M_{\mathrm{rel}} = 1{,}374$.
 
-**Information content.** With $K = 0.01$, the case-control sample is dominated by discordant pairs (one case, one control), which carry less information about $\lambda_S$ than concordant-affected pairs.  In the doubled dataset, 98 concordant full-sib pairs and 155 concordant case-case triplet sib-pairs were sampled, compared with 557 discordant pairs.
+**Singleton exclusion.**  Only the $M_{\mathrm{rel}}$ relatives contribute to the collapsed $\mu$ log-posterior.  Including singletons (whose $Z_{\mathrm{mix}}$ terms do not covary with any other individual) would introduce a large spurious downward bias via the $-\tfrac{1}{4}M\mu$ term.
 
-**Prior influence.** The half-Cauchy(1) prior has its mode at $\mu = 1$ but has substantial mass below the true value.  With $M_{\mathrm{rel}} \approx 500$–$1{,}100$ related individuals the prior still pulls the posterior downward relative to the likelihood.
+**Mixing.**  The PG-Gibbs sampler mixes more slowly than NUTS because the $\mu$ update conditions on $\boldsymbol\omega$ (which is sampled at the current $\mu$), introducing autocorrelation.  The collapsed update (integrating out $\mathbf{Z}_{\mathrm{mix}}$ analytically) reduces but does not eliminate this dependence.
 
-**Variance reduction with sample size.** Doubling $M$ reduced the posterior standard deviation from 0.292 to 0.219 and shifted the upper end of the 90% credible interval from 1.130 to 1.006, just containing the true value.  Further increases in $M_{\mathrm{rel}}$ are expected to narrow the interval enough for the data to dominate the prior.
+# References
 
-The singleton-exclusion fix was essential: including all $M$ individuals in the $\mu$ likelihood (without restriction to $M_{\mathrm{rel}}$) introduced a strong downward bias because the $-\tfrac{1}{4}M\mu$ term in the collapsed log-posterior overwhelmed the signal from the $\approx 500$ related individuals.
-
-The BLAS thread cold-start fix achieved a 38-fold speedup in overall sampler throughput by replacing `np.dot` calls on arrays of $n \approx 14{,}000$ with element-wise `.sum()` operations.  This avoided the per-call thread wakeup cost of OpenBLAS at a problem size that falls in the transition region between single-threaded and multi-threaded BLAS kernels.
+- Clayton DG (2009). Prediction and interaction in complex disease genetics: experience in type 1 diabetes. *PLoS Genetics*, 5(7), e1000540.
+- McKeigue PM (2019). Quantifying performance of a diagnostic test as the expected information for discrimination: relation to the C-statistic. *Statistical Methods in Medical Research*, 28(6), 1841–1851.
+- Polson NG, Scott JG, Windle J (2013). Bayesian inference for logistic models using Pólya-gamma latent variables. *Journal of the American Statistical Association*, 108(504), 1339–1349.
