@@ -104,7 +104,7 @@ def dense_from_groupedblocks(gb) -> np.ndarray:
     return L
 
 # Build block object used by scratch sampler
-from pg_gibbs_vectorized_clean import blockdiag_from_groupedblocks
+from pg_gibbs_clean import blockdiag_from_groupedblocks
 Lblk_rel = blockdiag_from_groupedblocks(gb_rel)
 
 # Dense matrix for checking
