@@ -15,6 +15,93 @@ All models share the structure: observed binary outcome y is Bernoulli with logi
 
 ---
 
+## `geninfo` module — Python API for PG-Gibbs inference
+
+`geninfo.py` exposes the PG-Gibbs sampler as a clean Python module with two public functions.
+
+### `sample_posterior`
+
+```python
+result = sample_posterior(
+    L,                        # (M, M) lower-triangular Cholesky factor
+    y,                        # (M,) binary case/control array (0 or 1)
+    *,
+    n_chains=4,
+    n_warmup=1000,
+    n_samples=5000,
+    mu_prior_scale=1.0,       # half-Cauchy scale on μ
+    p_prior_conc=20.0,        # Beta(K·p_obs, K·(1−p_obs)) concentration
+    seed=0,
+)
+```
+
+Internally detects block structure from the sparsity pattern of L, builds the `GroupedBlocks` representation, and runs `LRDiscreteBlockdiagPGGibbs` chains in parallel via `multiprocessing.Pool`.
+
+The returned dict contains:
+
+| Key | Content |
+|---|---|
+| `mu_chains` | `ndarray` (n_chains, n_samples) — per-chain μ samples |
+| `mu_all` | `ndarray` (n_chains × n_samples,) — all samples pooled |
+| `chain_dicts` | list of per-chain dicts (mu, beta0, p, ll, chain_id) |
+| `block_info` | dict with M, n_blocks, sizes_summary |
+| `cfg` | `ChainConfig` used |
+| `mu_prior_scale` | float |
+
+### `summarize_and_plot`
+
+```python
+stats = summarize_and_plot(
+    result,
+    *,
+    mu_true=None,    # optional true value; drawn as a vertical line
+    title=None,
+    outfile=None,    # path to save figure; if None, calls plt.show()
+    prior_scale=None,
+)
+```
+
+Prints mean, median, sd, 90% CI, ESS_bulk, and R-hat, then produces a figure with three curves:
+
+- **Prior** — half-Cauchy(μ_prior_scale), dashed gray
+- **Posterior** — KDE of μ samples, solid blue
+- **Likelihood** — importance-weighted KDE (posterior / prior), normalised, dot-dash red
+
+Returns a dict with keys `mean`, `median`, `sd`, `ci90_lo`, `ci90_hi`, `ess_bulk`, `r_hat`.
+
+### Example
+
+```python
+import numpy as np
+from geninfo import sample_posterior, summarize_and_plot
+from geneticinfo import simulate_casecontrol_related
+
+y, A, L, info, g = simulate_casecontrol_related(
+    n_fullsib_pairs=400_000, n_fullsib_trips=200_000,
+    n_halfsib_pairs=40_000, n_unrelated=4_000,
+    K=0.01, mu=2.0, seed=42, return_genotypic_values=True,
+)
+
+result = sample_posterior(
+    np.asarray(L), np.asarray(y),
+    n_chains=4, n_warmup=1000, n_samples=5000,
+)
+
+stats = summarize_and_plot(result, mu_true=2.0, outfile="posterior.png")
+print(stats)
+```
+
+### Files
+
+| File | Role |
+|---|---|
+| `geninfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
+| `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs`, `_worker_preloaded_lrpg` |
+| `pg_gibbs_vectorized.py` | `GroupedBlocks` (block-by-size storage and mat-vec) |
+| `polyagamma_gibbs.py` | `infer_blocks_from_L`, `BlockStructure`, `ChainConfig` |
+
+---
+
 ## Sampling algorithm 1: DiscreteHMCGibbs (NumPyro / JAX)
 
 ### Overview
@@ -235,6 +322,7 @@ Both 90% credible intervals contain the true value μ = 2.0.  The posterior medi
 
 | File | Description |
 |---|---|
+| `geninfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
 | `geneticinfo.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
 | `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs` sampler: exact match to `lr_discrete_blockdiag` model; `PGGibbsBlockSampler` reference implementation |
 | `pg_gibbs_vectorized.py` | Earlier vectorised PG-Gibbs sampler: grouped block operations, collapsed θ update |
