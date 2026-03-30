@@ -17,7 +17,39 @@ All models share the structure: observed binary outcome y is Bernoulli with logi
 
 ## `geninfo` module — Python API for PG-Gibbs inference
 
-`geninfo.py` exposes the PG-Gibbs sampler as a clean Python module with two public functions.
+`geninfo.py` exposes the PG-Gibbs sampler as a clean Python module with three public functions.
+
+### `build_blocks`
+
+Detects the block structure of the genetic relationship matrix and reports a summary.  Call this before `sample_posterior()` to inspect the decomposition and choose `corr_threshold` before committing to a long MCMC run.  The returned dict can be passed directly to `sample_posterior()` to avoid rebuilding.
+
+```python
+blocks = build_blocks(
+    L,                      # (M, M) lower-triangular Cholesky factor
+    y,                      # (M,) binary case/control array (0 or 1)
+    *,
+    corr_threshold=0.0,     # absolute correlation threshold (see below)
+)
+```
+
+Prints a one-line summary, for example:
+```
+Block structure: M=29522  n_blocks=1044  largest=3  relatives(size≥2)=1374
+  size-1: 830  size-2: 672  size-3: 10
+```
+
+#### Choosing `corr_threshold`
+
+By default (`corr_threshold=0.0`) only exact zeros in L are used to separate families, which is correct when L is exactly block-diagonal (e.g. a GRM built from known pedigree structure).
+
+Real GRMs estimated from genotype data contain small off-diagonal elements between nominally unrelated individuals due to distant kinship and population structure.  Setting a small positive threshold ignores these weak correlations and produces a finer block decomposition:
+
+```python
+# Treat pairs with |A[i,j]| ≤ 0.05 as unrelated
+blocks = build_blocks(L, y, corr_threshold=0.05)
+```
+
+When `corr_threshold > 0`, `build_blocks` computes `A = L @ L.T` and finds connected components of the thresholded adjacency graph using `scipy.sparse.csgraph.connected_components`.  This requires O(M²) additional memory.
 
 ### `sample_posterior`
 
@@ -26,16 +58,19 @@ result = sample_posterior(
     L,                        # (M, M) lower-triangular Cholesky factor
     y,                        # (M,) binary case/control array (0 or 1)
     *,
+    blocks=None,              # pre-built dict from build_blocks() (recommended)
     n_chains=4,
     n_warmup=1000,
     n_samples=5000,
     mu_prior_scale=1.0,       # half-Cauchy scale on μ
     p_prior_conc=20.0,        # Beta(K·p_obs, K·(1−p_obs)) concentration
     seed=0,
+    progress_bar=True,        # per-chain tqdm bars
+    corr_threshold=0.0,       # used only when blocks=None
 )
 ```
 
-Internally detects block structure from the sparsity pattern of L, builds the `GroupedBlocks` representation, and runs `LRDiscreteBlockdiagPGGibbs` chains in parallel via `multiprocessing.Pool`.
+Builds the `GroupedBlocks` representation (or uses pre-built `blocks`), prints block statistics, and runs `LRDiscreteBlockdiagPGGibbs` chains in parallel via `multiprocessing.Pool`.  Per-chain progress bars show warmup/sample phase and current μ.
 
 The returned dict contains:
 
@@ -44,7 +79,7 @@ The returned dict contains:
 | `mu_chains` | `ndarray` (n_chains, n_samples) — per-chain μ samples |
 | `mu_all` | `ndarray` (n_chains × n_samples,) — all samples pooled |
 | `chain_dicts` | list of per-chain dicts (mu, beta0, p, ll, chain_id) |
-| `block_info` | dict with M, n_blocks, sizes_summary |
+| `block_info` | dict with M, n_blocks, sizes_summary, corr_threshold |
 | `cfg` | `ChainConfig` used |
 | `mu_prior_scale` | float |
 
@@ -73,7 +108,7 @@ Returns a dict with keys `mean`, `median`, `sd`, `ci90_lo`, `ci90_hi`, `ess_bulk
 
 ```python
 import numpy as np
-from geninfo import sample_posterior, summarize_and_plot
+from geninfo import build_blocks, sample_posterior, summarize_and_plot
 from geneticinfo import simulate_casecontrol_related
 
 y, A, L, info, g = simulate_casecontrol_related(
@@ -81,9 +116,13 @@ y, A, L, info, g = simulate_casecontrol_related(
     n_halfsib_pairs=40_000, n_unrelated=4_000,
     K=0.01, mu=2.0, seed=42, return_genotypic_values=True,
 )
+L_np, y_np = np.asarray(L), np.asarray(y)
+
+# Inspect block structure first; adjust corr_threshold if needed
+blocks = build_blocks(L_np, y_np, corr_threshold=0.05)
 
 result = sample_posterior(
-    np.asarray(L), np.asarray(y),
+    L_np, y_np, blocks=blocks,
     n_chains=4, n_warmup=1000, n_samples=5000,
 )
 

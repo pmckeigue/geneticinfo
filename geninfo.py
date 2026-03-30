@@ -149,6 +149,20 @@ def _build_block_structure(
     return gb, y_perm, block_info
 
 
+def _print_block_info(block_info: dict) -> None:
+    bi = block_info
+    max_size = max(bi["sizes_summary"].keys()) if bi["sizes_summary"] else 0
+    n_rel = sum(s * n for s, n in bi["sizes_summary"].items() if s >= 2)
+    size_str = "  ".join(
+        f"size-{s}: {n}" for s, n in sorted(bi["sizes_summary"].items())
+    )
+    thr = bi.get("corr_threshold", 0.0)
+    thr_str = f"  corr_threshold={thr}" if thr > 0.0 else ""
+    print(f"Block structure: M={bi['M']}  n_blocks={bi['n_blocks']}  "
+          f"largest={max_size}  relatives(size≥2)={n_rel}{thr_str}")
+    print(f"  {size_str}")
+
+
 def _make_chain_config(
     n_warmup: int,
     n_samples: int,
@@ -267,10 +281,53 @@ def _worker_with_progress(args):
 
 # ─── public API ──────────────────────────────────────────────────────────────
 
+def build_blocks(
+    L: np.ndarray,
+    y: np.ndarray,
+    *,
+    corr_threshold: float = 0.0,
+) -> dict:
+    """
+    Detect and report the block structure of the genetic relationship matrix.
+
+    Call this before sample_posterior() to inspect the block decomposition and
+    choose an appropriate corr_threshold before committing to a long MCMC run.
+    The returned dict can be passed directly to sample_posterior() via the
+    ``blocks`` argument to avoid rebuilding.
+
+    Parameters
+    ----------
+    L : array of shape (M, M)
+        Lower-triangular Cholesky factor of the genetic relationship matrix.
+    y : array of shape (M,)
+        Binary case/control outcomes (0 or 1).
+    corr_threshold : float
+        Absolute correlation threshold.  Pairs with |A[i,j]| <= corr_threshold
+        are treated as unrelated.  Default 0.0 uses exact zeros in L only
+        (suitable when L is exactly block-diagonal).  A small positive value
+        (e.g. 0.05) handles GRMs with residual distant-relative correlations;
+        requires computing A = L @ L.T (O(M^2) memory).
+
+    Returns
+    -------
+    dict with keys:
+      "gb"         : GroupedBlocks object (passed to sample_posterior)
+      "y_perm"     : np.ndarray — y reordered to match gb
+      "block_info" : dict — M, n_blocks, sizes_summary, corr_threshold
+    """
+    L = np.asarray(L, dtype=np.float64)
+    y = np.asarray(y, dtype=np.float64)
+
+    gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
+    _print_block_info(block_info)
+    return {"gb": gb, "y_perm": y_perm, "block_info": block_info}
+
+
 def sample_posterior(
     L: np.ndarray,
     y: np.ndarray,
     *,
+    blocks: dict | None = None,
     n_chains: int = 4,
     n_warmup: int = 1000,
     n_samples: int = 5000,
@@ -290,6 +347,11 @@ def sample_posterior(
         Lower-triangular Cholesky factor of the genetic relationship matrix.
     y : array of shape (M,)
         Binary case/control outcomes (0 or 1).
+    blocks : dict, optional
+        Pre-built block structure from build_blocks().  If supplied, L, y and
+        corr_threshold are ignored for block detection and the sampler uses
+        the pre-built GroupedBlocks directly.  Recommended for large datasets
+        where block construction is expensive.
     n_chains : int
         Number of independent MCMC chains (run in parallel via fork).
     n_warmup : int
@@ -307,14 +369,11 @@ def sample_posterior(
     progress_bar : bool
         Show a tqdm progress bar for each chain (default True).
     corr_threshold : float
-        Absolute correlation threshold for block detection.  Pairs of
-        individuals with |A[i,j]| <= corr_threshold are treated as
-        unrelated, allowing approximately block-diagonal GRMs to be
-        split into separate families.  Default 0.0 uses only exact zeros
-        in L (appropriate when L is exactly block-diagonal).  Setting a
-        small positive value (e.g. 0.05) handles GRMs with residual
-        distant-relative correlations.  Requires computing A = L @ L.T,
-        which uses O(M^2) additional memory.
+        Absolute correlation threshold for block detection (ignored when
+        ``blocks`` is supplied).  Default 0.0 uses only exact zeros in L.
+        A small positive value (e.g. 0.05) handles GRMs with residual
+        distant-relative correlations; requires computing A = L @ L.T
+        (O(M^2) additional memory).
 
     Returns
     -------
@@ -322,25 +381,31 @@ def sample_posterior(
       "mu_chains"   : np.ndarray (n_chains, n_samples) — per-chain samples
       "mu_all"      : np.ndarray (n_chains * n_samples,) — all samples pooled
       "chain_dicts" : list of per-chain result dicts (mu, beta0, p, ll, chain_id)
-      "block_info"  : dict — M, n_blocks, sizes_summary
+      "block_info"  : dict — M, n_blocks, sizes_summary, corr_threshold
       "cfg"         : ChainConfig used
       "mu_prior_scale" : float
     """
-    L = np.asarray(L, dtype=np.float64)
-    y = np.asarray(y, dtype=np.float64)
+    if blocks is not None:
+        gb = blocks["gb"]
+        y_perm = blocks["y_perm"]
+        block_info = blocks["block_info"]
+        _print_block_info(block_info)
+    else:
+        L = np.asarray(L, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        if L.ndim != 2 or L.shape[0] != L.shape[1]:
+            raise ValueError(f"L must be a square 2-D array; got shape {L.shape}")
+        M = L.shape[0]
+        if y.shape != (M,):
+            raise ValueError(f"y must have shape ({M},); got {y.shape}")
+        if not np.all((y == 0) | (y == 1)):
+            raise ValueError("y must contain only 0s and 1s")
+        gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
+        _print_block_info(block_info)
 
-    if L.ndim != 2 or L.shape[0] != L.shape[1]:
-        raise ValueError(f"L must be a square 2-D array; got shape {L.shape}")
-    M = L.shape[0]
-    if y.shape != (M,):
-        raise ValueError(f"y must have shape ({M},); got {y.shape}")
-    if not np.all((y == 0) | (y == 1)):
-        raise ValueError("y must contain only 0s and 1s")
-
-    gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
     cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc)
 
-    p_obs = float(np.mean(y))
+    p_obs = float(np.mean(y_perm))
 
     jobs = [
         (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
