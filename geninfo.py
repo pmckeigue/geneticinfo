@@ -37,8 +37,11 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.stats import gaussian_kde
 from scipy.sparse.csgraph import connected_components as _scipy_connected_components
+from threadpoolctl import threadpool_limits
 
-# Suppress BLAS threading contention when running multiple chains via fork.
+# Set conservative defaults at import time so the parent process does not spin
+# up many threads before forking.  Each worker overrides this via
+# threadpool_limits() using the per-chain allocation from sample_posterior().
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
@@ -193,16 +196,26 @@ def _halfcauchy_pdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
 
 # ─── progress-bar worker ─────────────────────────────────────────────────────
 
+def _worker_nobar(args):
+    """No-progress-bar worker: sets BLAS threads then delegates."""
+    n_blas_threads = args[-1] if isinstance(args[-1], int) else 1
+    with threadpool_limits(limits=n_blas_threads, user_api="blas"):
+        return _worker_preloaded_lrpg(args[:-1])
+
+
 def _worker_with_progress(args):
     """
     Like _worker_preloaded_lrpg but drives the step loop explicitly so that
     tqdm can display a per-chain progress bar.
 
-    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override)
+    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override, n_blas_threads)
     """
     chain_id, gb, y_perm, seed, cfg = args[:5]
     true_mu = args[5] if len(args) > 5 else float("nan")
     p_obs_override = args[6] if len(args) > 6 else None
+    n_blas_threads = args[7] if len(args) > 7 else 1
+
+    threadpool_limits(limits=n_blas_threads, user_api="blas")
 
     rng = np.random.default_rng(seed)
     y_perm = np.asarray(y_perm, dtype=np.float64)
@@ -336,6 +349,7 @@ def sample_posterior(
     seed: int = 0,
     progress_bar: bool = True,
     corr_threshold: float = 0.0,
+    n_blas_threads: int | None = None,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -374,6 +388,15 @@ def sample_posterior(
         A small positive value (e.g. 0.05) handles GRMs with residual
         distant-relative correlations; requires computing A = L @ L.T
         (O(M^2) additional memory).
+    n_blas_threads : int, optional
+        Number of OpenBLAS/MKL threads allocated to each chain for
+        matrix multiplications, Cholesky decompositions, and
+        eigendecompositions.  Defaults to ``n_cpu // n_chains`` so that
+        total thread usage equals the number of available cores.  For a
+        single large block (e.g. 2918×2918), increasing this (and
+        reducing n_chains accordingly) gives the largest speedup: each
+        Gibbs step contains four O(n³) BLAS/LAPACK calls that scale
+        well with thread count.
 
     Returns
     -------
@@ -405,10 +428,16 @@ def sample_posterior(
 
     cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc)
 
+    n_cpu = os.cpu_count() or 1
+    if n_blas_threads is None:
+        n_blas_threads = max(1, n_cpu // n_chains)
+    print(f"  {n_chains} chain(s) × {n_blas_threads} BLAS thread(s) per chain "
+          f"({n_chains * n_blas_threads} of {n_cpu} CPUs)")
+
     p_obs = float(np.mean(y_perm))
 
     jobs = [
-        (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
+        (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, n_blas_threads)
         for cid in range(n_chains)
     ]
 
@@ -421,7 +450,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         with ctx.Pool(processes=n_chains) as pool:
-            chain_dicts = pool.map(_worker_preloaded_lrpg, jobs)
+            chain_dicts = pool.map(_worker_nobar, jobs)
 
     mu_chains = np.stack([c["mu"] for c in chain_dicts])   # (n_chains, n_samples)
     mu_all = mu_chains.ravel()
