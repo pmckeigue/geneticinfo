@@ -34,7 +34,9 @@ import arviz as az
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from collections import defaultdict
 from scipy.stats import gaussian_kde
+from scipy.sparse.csgraph import connected_components as _scipy_connected_components
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -56,34 +58,93 @@ from pg_gibbs_clean import (
 
 # ─── private helpers ─────────────────────────────────────────────────────────
 
+def _blocks_from_corr_threshold(
+    A: np.ndarray,
+    corr_threshold: float,
+) -> tuple[np.ndarray, list[slice]]:
+    """
+    Find connected components of individuals with |A[i,j]| > corr_threshold.
+
+    Uses the same adjacency construction as grm_functions.block_diagonal_split
+    but returns individual blocks (one per connected component) rather than
+    packing them into groups, as required by GroupedBlocks.
+
+    Returns
+    -------
+    perm : np.ndarray  permutation of row/column indices
+    slices : list[slice]  one slice per connected component in permuted order
+    """
+    n = A.shape[0]
+    adjacency = (np.abs(A) > corr_threshold) & (~np.eye(n, dtype=bool))
+    _, labels = _scipy_connected_components(adjacency, directed=False)
+
+    components: dict[int, list[int]] = defaultdict(list)
+    for idx, lbl in enumerate(labels):
+        components[lbl].append(idx)
+    blocks = sorted(components.values(), key=lambda b: min(b))
+
+    perm = np.array([idx for block in blocks for idx in block], dtype=np.int64)
+
+    slices: list[slice] = []
+    offset = 0
+    for block in blocks:
+        slices.append(slice(offset, offset + len(block)))
+        offset += len(block)
+
+    return perm, slices
+
+
 def _build_block_structure(
     L: np.ndarray,
     y: np.ndarray,
+    corr_threshold: float = 0.0,
 ) -> tuple[GroupedBlocks, np.ndarray, dict]:
     """
     Permute L and y into block-diagonal order and return GroupedBlocks.
+
+    Parameters
+    ----------
+    L : (M, M) Cholesky factor
+    y : (M,) binary outcomes
+    corr_threshold : float
+        Absolute correlation threshold.  Pairs with |A[i,j]| <= corr_threshold
+        are treated as unrelated, allowing approximately block-diagonal GRMs to
+        be split into separate families.  When 0.0 (default), only exact zeros
+        in L are used to identify blocks (suitable when L is exactly
+        block-diagonal).  When > 0, A = L @ L.T is computed and
+        connected_components is called on the thresholded adjacency matrix
+        (approach from grm_functions.block_diagonal_split).  This requires
+        O(M^2) memory for A.
 
     Returns
     -------
     gb : GroupedBlocks
     y_perm : np.ndarray  (y reordered to match gb)
-    block_info : dict with keys M, n_blocks, sizes_summary
+    block_info : dict with keys M, n_blocks, sizes_summary, corr_threshold
     """
     L_np = np.asarray(L, dtype=np.float64)
     y_np = np.asarray(y, dtype=np.float64)
 
-    perm_rows, perm_cols, row_slices, col_slices = infer_blocks_from_L(L_np, tol_rel=0.0)
-    L_perm = L_np[perm_rows, :][:, perm_cols]
-    y_perm = y_np[perm_rows]
+    if corr_threshold > 0.0:
+        A = L_np @ L_np.T
+        perm, slices = _blocks_from_corr_threshold(A, corr_threshold)
+        L_perm = L_np[np.ix_(perm, perm)]
+        y_perm = y_np[perm]
+        bs = BlockStructure(L_perm, slices)
+    else:
+        perm_rows, perm_cols, row_slices, col_slices = infer_blocks_from_L(L_np, tol_rel=0.0)
+        L_perm = L_np[perm_rows, :][:, perm_cols]
+        y_perm = y_np[perm_rows]
+        bs = BlockStructure(L_perm, col_slices, row_slices)
 
-    bs = BlockStructure(L_perm, col_slices, row_slices)
     gb = GroupedBlocks.from_block_structure(bs)
 
     sizes_summary = {s: int(gb.L_by_size[s].shape[0]) for s in gb.sizes}
     block_info = {
         "M": int(gb.M),
         "n_blocks": int(bs.n_blocks),
-        "sizes_summary": sizes_summary,  # {block_size: n_blocks_of_that_size}
+        "sizes_summary": sizes_summary,
+        "corr_threshold": corr_threshold,
     }
     return gb, y_perm, block_info
 
@@ -217,6 +278,7 @@ def sample_posterior(
     p_prior_conc: float = 20.0,
     seed: int = 0,
     progress_bar: bool = True,
+    corr_threshold: float = 0.0,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -244,6 +306,15 @@ def sample_posterior(
         Base random seed; chain c uses seed+c.
     progress_bar : bool
         Show a tqdm progress bar for each chain (default True).
+    corr_threshold : float
+        Absolute correlation threshold for block detection.  Pairs of
+        individuals with |A[i,j]| <= corr_threshold are treated as
+        unrelated, allowing approximately block-diagonal GRMs to be
+        split into separate families.  Default 0.0 uses only exact zeros
+        in L (appropriate when L is exactly block-diagonal).  Setting a
+        small positive value (e.g. 0.05) handles GRMs with residual
+        distant-relative correlations.  Requires computing A = L @ L.T,
+        which uses O(M^2) additional memory.
 
     Returns
     -------
@@ -266,7 +337,7 @@ def sample_posterior(
     if not np.all((y == 0) | (y == 1)):
         raise ValueError("y must contain only 0s and 1s")
 
-    gb, y_perm, block_info = _build_block_structure(L, y)
+    gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
     cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc)
 
     p_obs = float(np.mean(y))
