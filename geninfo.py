@@ -41,9 +41,17 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+from tqdm import tqdm
+
 from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
 from pg_gibbs_vectorized import GroupedBlocks
-from pg_gibbs_clean import _worker_preloaded_lrpg
+from pg_gibbs_clean import (
+    _worker_preloaded_lrpg,
+    LRBlockdiagPGConfig,
+    LRDiscreteBlockdiagPGGibbs,
+    blockdiag_from_groupedblocks,
+    bernoulli_loglik_logit_np,
+)
 
 
 # ─── private helpers ─────────────────────────────────────────────────────────
@@ -108,6 +116,94 @@ def _halfcauchy_pdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
     return 2.0 / (np.pi * scale * (1.0 + (x / scale) ** 2))
 
 
+# ─── progress-bar worker ─────────────────────────────────────────────────────
+
+def _worker_with_progress(args):
+    """
+    Like _worker_preloaded_lrpg but drives the step loop explicitly so that
+    tqdm can display a per-chain progress bar.
+
+    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override)
+    """
+    chain_id, gb, y_perm, seed, cfg = args[:5]
+    true_mu = args[5] if len(args) > 5 else float("nan")
+    p_obs_override = args[6] if len(args) > 6 else None
+
+    rng = np.random.default_rng(seed)
+    y_perm = np.asarray(y_perm, dtype=np.float64)
+    Lblk = blockdiag_from_groupedblocks(gb)
+
+    p_obs = float(p_obs_override) if p_obs_override is not None else float(np.mean(y_perm))
+
+    lr_cfg = LRBlockdiagPGConfig(
+        n_warmup=int(cfg.n_warmup),
+        n_samples=int(cfg.n_samples),
+        K_beta=20.0,
+        p_obs=p_obs,
+        mu_prior_scale=float(cfg.prior_scale),
+        slice_w_phi=float(cfg.slice_w),
+        slice_m_phi=int(cfg.slice_m),
+        slice_w_theta=float(cfg.slice_w),
+        slice_m_theta=int(cfg.slice_m),
+    )
+
+    sampler = LRDiscreteBlockdiagPGGibbs(
+        rng=rng,
+        Lblk=Lblk,
+        y=y_perm,
+        cfg=lr_cfg,
+        phi_init=None,
+        mu_init=float(np.exp(getattr(cfg, "prior_loc", 0.0))),
+    )
+
+    n_w = lr_cfg.n_warmup
+    n_s = lr_cfg.n_samples
+    total = n_w + n_s
+
+    bar = tqdm(
+        total=total,
+        position=chain_id,
+        desc=f"chain {chain_id}  warmup ",
+        leave=True,
+        dynamic_ncols=True,
+    )
+
+    for i in range(n_w):
+        sampler.step()
+        if i % 50 == 0:
+            bar.set_postfix(mu=f"{sampler.mu:.3f}", refresh=False)
+        bar.update(1)
+
+    bar.set_description(f"chain {chain_id}  sample")
+
+    mu = np.empty(n_s, dtype=np.float64)
+    beta0 = np.empty(n_s, dtype=np.float64)
+    p = np.empty(n_s, dtype=np.float64)
+    ll = np.empty(n_s, dtype=np.float64)
+
+    for t in range(n_s):
+        sampler.step()
+        mu[t] = sampler.mu
+        beta0[t] = sampler.phi
+        p[t] = sampler.current_p()
+        ll[t] = bernoulli_loglik_logit_np(sampler.current_eta(), y_perm)
+        if t % 50 == 0:
+            bar.set_postfix(mu=f"{sampler.mu:.3f}", refresh=False)
+        bar.update(1)
+
+    bar.set_postfix(mu=f"{mu.mean():.3f}")
+    bar.close()
+
+    return {
+        "chain_id": int(chain_id),
+        "true_mu": float(true_mu),
+        "mu": mu,
+        "beta0": beta0,
+        "p": p,
+        "ll": ll,
+    }
+
+
 # ─── public API ──────────────────────────────────────────────────────────────
 
 def sample_posterior(
@@ -120,6 +216,7 @@ def sample_posterior(
     mu_prior_scale: float = 1.0,
     p_prior_conc: float = 20.0,
     seed: int = 0,
+    progress_bar: bool = True,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -145,6 +242,8 @@ def sample_posterior(
         centred at the observed case rate.
     seed : int
         Base random seed; chain c uses seed+c.
+    progress_bar : bool
+        Show a tqdm progress bar for each chain (default True).
 
     Returns
     -------
@@ -172,16 +271,21 @@ def sample_posterior(
 
     p_obs = float(np.mean(y))
 
-    # Job tuple matches _worker_preloaded_lrpg signature:
-    #   (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override, ...)
     jobs = [
         (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
         for cid in range(n_chains)
     ]
 
     ctx = mp.get_context("fork")
-    with ctx.Pool(processes=n_chains) as pool:
-        chain_dicts = pool.map(_worker_preloaded_lrpg, jobs)
+    if progress_bar:
+        lock = ctx.RLock()
+        with ctx.Pool(processes=n_chains,
+                      initializer=tqdm.set_lock, initargs=(lock,)) as pool:
+            chain_dicts = pool.map(_worker_with_progress, jobs)
+        print()  # newline after the stacked bars
+    else:
+        with ctx.Pool(processes=n_chains) as pool:
+            chain_dicts = pool.map(_worker_preloaded_lrpg, jobs)
 
     mu_chains = np.stack([c["mu"] for c in chain_dicts])   # (n_chains, n_samples)
     mu_all = mu_chains.ravel()
