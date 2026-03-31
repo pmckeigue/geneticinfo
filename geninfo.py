@@ -44,31 +44,74 @@ def _set_blas_threads(n: int) -> None:
     """
     Set BLAS/LAPACK thread count in the current process.
 
-    Works for both OpenBLAS and MKL:
-    1. Update environment variables — MKL re-reads these after fork when it
-       recreates its thread pool.
-    2. mkl.set_num_threads(n) via the mkl-service package (conda MKL envs).
-    3. Direct ctypes call to openblas_set_num_threads() for OpenBLAS.
+    Tries four methods so this works for both OpenBLAS and MKL, including
+    inside forked subprocesses where threadpoolctl's dl_iterate_phdr /
+    RTLD_NOLOAD library discovery sometimes fails:
+
+    1. Set BLAS env vars — MKL re-reads MKL_NUM_THREADS when it (re-)creates
+       its thread pool after fork.
+    2. MKL: load libmkl_rt.so directly via ctypes (without RTLD_NOLOAD, which
+       avoids the path-resolution failure that threadpoolctl hits in forked
+       processes), then call MKL_Set_Num_Threads.
+    3. OpenBLAS: call openblas_set_num_threads via the global symbol table
+       (ctypes.CDLL(None)) and also try mkl-service if available.
     4. threadpoolctl.threadpool_limits() as a final fallback, with
        dl_iterate_phdr warnings suppressed.
     """
     import ctypes
-    # 1. Env vars — inherited by forked workers and re-read by MKL on fork
+    # 1. Env vars
     os.environ["MKL_NUM_THREADS"] = str(n)
     os.environ["OMP_NUM_THREADS"] = str(n)
     os.environ["OPENBLAS_NUM_THREADS"] = str(n)
-    # 2. MKL Python API (mkl-service package, standard in conda MKL envs)
-    try:
-        import mkl
-        mkl.set_num_threads(n)
-    except Exception:
-        pass
-    # 3. OpenBLAS direct C API via global symbol table
+    # 2. MKL: try loading libmkl_rt directly (no RTLD_NOLOAD, so this works
+    #    even when dl_iterate_phdr paths are stale in forked workers).
+    #    First try names that rely on LD_LIBRARY_PATH / ldconfig; then scan
+    #    /proc/self/maps to find the exact path of the already-loaded library.
+    def _try_mkl_set(lib):
+        try:
+            lib.MKL_Set_Num_Threads(ctypes.c_int(n))
+            return True
+        except Exception:
+            return False
+
+    _mkl_done = False
+    for _mkl_name in ("libmkl_rt.so", "libmkl_rt.so.2", "libmkl_rt.so.1",
+                      "mkl_rt"):
+        try:
+            if _try_mkl_set(ctypes.CDLL(_mkl_name)):
+                _mkl_done = True
+                break
+        except Exception:
+            pass
+
+    if not _mkl_done:
+        # Fall back to scanning /proc/self/maps for the loaded MKL path
+        try:
+            import re as _re
+            with open("/proc/self/maps") as _f:
+                for _line in _f:
+                    _m = _re.search(r'(/[^\s]*libmkl_rt[^\s]*\.so[0-9.]*)', _line)
+                    if _m:
+                        _path = _m.group(1)
+                        try:
+                            if _try_mkl_set(ctypes.CDLL(_path)):
+                                break
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+    # 3a. OpenBLAS via global symbol table
     try:
         ctypes.CDLL(None).openblas_set_num_threads(ctypes.c_int(n))
     except Exception:
         pass
-    # 4. threadpoolctl fallback
+    # 3b. mkl-service Python package (conda)
+    try:
+        import mkl as _mkl
+        _mkl.set_num_threads(n)
+    except Exception:
+        pass
+    # 4. threadpoolctl fallback (covers scipy_openblas, Accelerate, etc.)
     _old = sys.unraisablehook
     sys.unraisablehook = lambda _args: None
     try:
