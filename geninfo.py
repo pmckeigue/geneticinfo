@@ -31,8 +31,6 @@ import multiprocessing as mp
 import os
 import numpy as np
 import arviz as az
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.stats import gaussian_kde
