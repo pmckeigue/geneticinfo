@@ -706,7 +706,11 @@ def summarize_and_plot(
         fig.savefig(outfile, dpi=150, bbox_inches="tight")
         print(f"  Plot saved: {outfile}")
     else:
-        plt.show()
+        try:
+            from IPython.display import display as _ipy_display
+            _ipy_display(fig)
+        except ImportError:
+            plt.show()
     plt.close(fig)
 
     return {
