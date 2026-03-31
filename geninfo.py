@@ -42,19 +42,33 @@ from threadpoolctl import threadpool_limits
 
 def _set_blas_threads(n: int) -> None:
     """
-    Set BLAS thread count via threadpoolctl, suppressing the spurious
-    'Exception ignored on calling ctypes callback function' warnings that
-    threadpoolctl's dl_iterate_phdr library-discovery emits in forked
-    child processes when some parent-process library paths are no longer
-    resolvable.  Python routes unraisable ctypes-callback exceptions through
-    sys.unraisablehook, so we temporarily replace it with a no-op.
+    Set BLAS/LAPACK thread count in the current process.
+
+    Tries two methods in order:
+    1. Direct ctypes call to openblas_set_num_threads() via the global symbol
+       table (ctypes.CDLL(None)).  This works reliably inside forked workers
+       without needing library-path discovery.
+    2. threadpoolctl.threadpool_limits() as a fallback for non-OpenBLAS BLAS
+       (e.g. MKL), with dl_iterate_phdr warnings suppressed.
     """
+    import ctypes
+    # Method 1: direct OpenBLAS API call
+    try:
+        ctypes.CDLL(None).openblas_set_num_threads(ctypes.c_int(n))
+    except Exception:
+        pass
+    # Method 2: threadpoolctl (covers MKL, Accelerate, etc.)
     _old = sys.unraisablehook
     sys.unraisablehook = lambda _args: None
     try:
         threadpool_limits(limits=n, user_api="blas")
     finally:
         sys.unraisablehook = _old
+
+
+def _pool_init_blas(n_threads: int) -> None:
+    """Pool initializer: set BLAS threads in each worker right after fork."""
+    _set_blas_threads(n_threads)
 
 # Set conservative defaults at import time so the parent process does not spin
 # up many threads before forking.  Each worker overrides this via
@@ -451,13 +465,16 @@ def sample_posterior(
         n_blas_threads = max(1, n_cpu // n_chains)
     print(f"  {n_chains} chain(s) × {n_blas_threads} BLAS thread(s) per chain "
           f"({n_chains * n_blas_threads} of {n_cpu} CPUs)")
+    from threadpoolctl import threadpool_info
+    _set_blas_threads(n_blas_threads)
+    _blas_info = [x for x in threadpool_info() if x.get("user_api") == "blas"]
+    if _blas_info:
+        print(f"  [debug] BLAS libraries found: " +
+              ", ".join(f"{x['internal_api']} num_threads={x['num_threads']}" for x in _blas_info), flush=True)
+    else:
+        print(f"  [debug] threadpoolctl found no BLAS libraries (will use direct ctypes in workers)", flush=True)
 
     p_obs = float(np.mean(y_perm))
-
-    # Set BLAS threads in the parent process now so that:
-    #  - forked workers (progress_bar=False) inherit the setting via fork
-    #  - threads (progress_bar=True) share the same process-wide setting
-    _set_blas_threads(n_blas_threads)
 
     ctx = mp.get_context("fork")
     if progress_bar:
@@ -481,7 +498,9 @@ def sample_posterior(
         ]
         print(f"  [debug] tqdm bars created, spawning Pool", flush=True)
 
-        with ctx.Pool(processes=n_chains) as pool:
+        with ctx.Pool(processes=n_chains,
+                      initializer=_pool_init_blas,
+                      initargs=(n_blas_threads,)) as pool:
             print(f"  [debug] Pool spawned, submitting map_async", flush=True)
             async_result = pool.map_async(_worker_with_queue, jobs)
             print(f"  [debug] map_async submitted, entering monitor loop", flush=True)
@@ -507,12 +526,13 @@ def sample_posterior(
         chain_dicts = async_result.get()
         print()  # newline after the stacked bars
     else:
-        # Forked subprocesses inherit the parent's BLAS thread count.
         jobs = [
             (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, False, False)
             for cid in range(n_chains)
         ]
-        with ctx.Pool(processes=n_chains) as pool:
+        with ctx.Pool(processes=n_chains,
+                      initializer=_pool_init_blas,
+                      initargs=(n_blas_threads,)) as pool:
             chain_dicts = pool.map(_worker_nobar, jobs)
 
     mu_chains = np.stack([c["mu"] for c in chain_dicts])   # (n_chains, n_samples)
