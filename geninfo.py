@@ -46,7 +46,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
 from pg_gibbs_vectorized import GroupedBlocks
