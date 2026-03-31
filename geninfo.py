@@ -124,12 +124,12 @@ def _pool_init_blas(n_threads: int) -> None:
     """Pool initializer: set BLAS threads in each worker right after fork."""
     _set_blas_threads(n_threads)
 
-# Set conservative defaults at import time so the parent process does not spin
-# up many threads before forking.  Each worker overrides this via
-# threadpool_limits() using the per-chain allocation from sample_posterior().
-os.environ.setdefault("MKL_NUM_THREADS", "1")
-os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
-os.environ.setdefault("OMP_NUM_THREADS", "1")
+# Limit BLAS threads to 1 at import time.  numpy imports MKL/OpenBLAS before
+# this point, so os.environ.setdefault() would only set env vars — it cannot
+# change the already-running BLAS thread pool.  Calling _set_blas_threads(1)
+# directly limits the pool immediately.  Workers override this via
+# _pool_init_blas(n_blas_threads) in the Pool initialiser.
+_set_blas_threads(1)
 
 # Module-level queue used by _worker_with_queue.  Set in the parent process
 # before Pool creation so that forked workers inherit it without pickling.
