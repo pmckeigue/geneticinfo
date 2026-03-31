@@ -44,20 +44,31 @@ def _set_blas_threads(n: int) -> None:
     """
     Set BLAS/LAPACK thread count in the current process.
 
-    Tries two methods in order:
-    1. Direct ctypes call to openblas_set_num_threads() via the global symbol
-       table (ctypes.CDLL(None)).  This works reliably inside forked workers
-       without needing library-path discovery.
-    2. threadpoolctl.threadpool_limits() as a fallback for non-OpenBLAS BLAS
-       (e.g. MKL), with dl_iterate_phdr warnings suppressed.
+    Works for both OpenBLAS and MKL:
+    1. Update environment variables — MKL re-reads these after fork when it
+       recreates its thread pool.
+    2. mkl.set_num_threads(n) via the mkl-service package (conda MKL envs).
+    3. Direct ctypes call to openblas_set_num_threads() for OpenBLAS.
+    4. threadpoolctl.threadpool_limits() as a final fallback, with
+       dl_iterate_phdr warnings suppressed.
     """
     import ctypes
-    # Method 1: direct OpenBLAS API call
+    # 1. Env vars — inherited by forked workers and re-read by MKL on fork
+    os.environ["MKL_NUM_THREADS"] = str(n)
+    os.environ["OMP_NUM_THREADS"] = str(n)
+    os.environ["OPENBLAS_NUM_THREADS"] = str(n)
+    # 2. MKL Python API (mkl-service package, standard in conda MKL envs)
+    try:
+        import mkl
+        mkl.set_num_threads(n)
+    except Exception:
+        pass
+    # 3. OpenBLAS direct C API via global symbol table
     try:
         ctypes.CDLL(None).openblas_set_num_threads(ctypes.c_int(n))
     except Exception:
         pass
-    # Method 2: threadpoolctl (covers MKL, Accelerate, etc.)
+    # 4. threadpoolctl fallback
     _old = sys.unraisablehook
     sys.unraisablehook = lambda _args: None
     try:
@@ -465,14 +476,19 @@ def sample_posterior(
         n_blas_threads = max(1, n_cpu // n_chains)
     print(f"  {n_chains} chain(s) × {n_blas_threads} BLAS thread(s) per chain "
           f"({n_chains * n_blas_threads} of {n_cpu} CPUs)")
-    from threadpoolctl import threadpool_info
     _set_blas_threads(n_blas_threads)
-    _blas_info = [x for x in threadpool_info() if x.get("user_api") == "blas"]
+    from threadpoolctl import threadpool_info
+    _old_hook = sys.unraisablehook
+    sys.unraisablehook = lambda _args: None
+    try:
+        _blas_info = [x for x in threadpool_info() if x.get("user_api") == "blas"]
+    finally:
+        sys.unraisablehook = _old_hook
     if _blas_info:
-        print(f"  [debug] BLAS libraries found: " +
+        print(f"  [debug] BLAS: " +
               ", ".join(f"{x['internal_api']} num_threads={x['num_threads']}" for x in _blas_info), flush=True)
     else:
-        print(f"  [debug] threadpoolctl found no BLAS libraries (will use direct ctypes in workers)", flush=True)
+        print(f"  [debug] threadpoolctl found no BLAS libraries", flush=True)
 
     p_obs = float(np.mean(y_perm))
 
