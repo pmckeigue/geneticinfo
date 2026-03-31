@@ -37,7 +37,25 @@ import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.stats import gaussian_kde
 from scipy.sparse.csgraph import connected_components as _scipy_connected_components
+import sys
 from threadpoolctl import threadpool_limits
+
+
+def _set_blas_threads(n: int) -> None:
+    """
+    Set BLAS thread count via threadpoolctl, suppressing the spurious
+    'Exception ignored on calling ctypes callback function' warnings that
+    threadpoolctl's dl_iterate_phdr library-discovery emits in forked
+    child processes when some parent-process library paths are no longer
+    resolvable.  Python routes unraisable ctypes-callback exceptions through
+    sys.unraisablehook, so we temporarily replace it with a no-op.
+    """
+    _old = sys.unraisablehook
+    sys.unraisablehook = lambda _args: None
+    try:
+        threadpool_limits(limits=n, user_api="blas")
+    finally:
+        sys.unraisablehook = _old
 
 # Set conservative defaults at import time so the parent process does not spin
 # up many threads before forking.  Each worker overrides this via
@@ -199,8 +217,8 @@ def _halfcauchy_pdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
 def _worker_nobar(args):
     """No-progress-bar worker: sets BLAS threads then delegates."""
     n_blas_threads = args[-1] if isinstance(args[-1], int) else 1
-    with threadpool_limits(limits=n_blas_threads, user_api="blas"):
-        return _worker_preloaded_lrpg(args[:-1])
+    _set_blas_threads(n_blas_threads)
+    return _worker_preloaded_lrpg(args[:-1])
 
 
 def _worker_with_progress(args):
@@ -215,7 +233,7 @@ def _worker_with_progress(args):
     p_obs_override = args[6] if len(args) > 6 else None
     n_blas_threads = args[7] if len(args) > 7 else 1
 
-    threadpool_limits(limits=n_blas_threads, user_api="blas")
+    _set_blas_threads(n_blas_threads)
 
     rng = np.random.default_rng(seed)
     y_perm = np.asarray(y_perm, dtype=np.float64)
