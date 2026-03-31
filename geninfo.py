@@ -560,9 +560,12 @@ def sample_posterior(
                         finished += 1
                 except _queue_module.Empty:
                     pass
+            # Collect results inside the pool context so pool.terminate()
+            # (called by __exit__) does not race with workers finalising
+            # their return values.
+            chain_dicts = async_result.get()
         for bar in bars:
             bar.close()
-        chain_dicts = async_result.get()
         print()  # newline after the stacked bars
     else:
         jobs = [
