@@ -475,14 +475,12 @@ def sample_posterior(
         distant-relative correlations; requires computing A = L @ L.T
         (O(M^2) additional memory).
     n_blas_threads : int, optional
-        Number of OpenBLAS/MKL threads allocated to each chain for
-        matrix multiplications, Cholesky decompositions, and
-        eigendecompositions.  Defaults to ``n_cpu // n_chains`` so that
-        total thread usage equals the number of available cores.  For a
-        single large block (e.g. 2918×2918), increasing this (and
-        reducing n_chains accordingly) gives the largest speedup: each
-        Gibbs step contains four O(n³) BLAS/LAPACK calls that scale
-        well with thread count.
+        Number of BLAS threads allocated to each chain.  Defaults to 1.
+        MKL and OpenBLAS Cholesky factorisation shows negligible speedup
+        below roughly 5000×5000 (e.g. only ~11% faster at 8 threads for
+        1500×1500 on MKL), so the default of 1 keeps all cores available
+        for inter-chain parallelism.  Increase only if you have a single
+        very large block and can spare threads from chain parallelism.
 
     Returns
     -------
@@ -516,22 +514,10 @@ def sample_posterior(
 
     n_cpu = os.cpu_count() or 1
     if n_blas_threads is None:
-        n_blas_threads = max(1, n_cpu // n_chains)
-    print(f"  {n_chains} chain(s) × {n_blas_threads} BLAS thread(s) per chain "
-          f"({n_chains * n_blas_threads} of {n_cpu} CPUs)")
+        n_blas_threads = 1  # MKL/OpenBLAS Cholesky scales poorly below ~5000x5000
+    print(f"  {n_chains} chain(s) × {n_blas_threads} BLAS thread(s)/chain "
+          f"({n_chains * n_blas_threads} of {n_cpu} CPUs used)")
     _set_blas_threads(n_blas_threads)
-    from threadpoolctl import threadpool_info
-    _old_hook = sys.unraisablehook
-    sys.unraisablehook = lambda _args: None
-    try:
-        _blas_info = [x for x in threadpool_info() if x.get("user_api") == "blas"]
-    finally:
-        sys.unraisablehook = _old_hook
-    if _blas_info:
-        print(f"  [debug] BLAS: " +
-              ", ".join(f"{x['internal_api']} num_threads={x['num_threads']}" for x in _blas_info), flush=True)
-    else:
-        print(f"  [debug] threadpoolctl found no BLAS libraries", flush=True)
 
     p_obs = float(np.mean(y_perm))
 
@@ -542,27 +528,22 @@ def sample_posterior(
         # pool task pipe, which can deadlock).
         global _POOL_PROGRESS_Q
         _POOL_PROGRESS_Q = ctx.Queue()
-        print(f"  [debug] progress queue created", flush=True)
 
         jobs = [
             (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
             for cid in range(n_chains)
         ]
-        print(f"  [debug] jobs built ({len(jobs)} chains)", flush=True)
 
         bars = [
             tqdm(total=n_warmup + n_samples, position=cid,
                  desc=f"chain {cid}  warmup", leave=True, dynamic_ncols=True)
             for cid in range(n_chains)
         ]
-        print(f"  [debug] tqdm bars created, spawning Pool", flush=True)
 
         with ctx.Pool(processes=n_chains,
                       initializer=_pool_init_blas,
                       initargs=(n_blas_threads,)) as pool:
-            print(f"  [debug] Pool spawned, submitting map_async", flush=True)
             async_result = pool.map_async(_worker_with_queue, jobs)
-            print(f"  [debug] map_async submitted, entering monitor loop", flush=True)
             finished = 0
             while finished < n_chains:
                 try:
@@ -577,7 +558,6 @@ def sample_posterior(
                         bars[cid].set_description(f"chain {cid}  {msg[2]}")
                     elif kind == "done":
                         finished += 1
-                        print(f"  [debug] chain {cid} done ({finished}/{n_chains})", flush=True)
                 except _queue_module.Empty:
                     pass
         for bar in bars:
