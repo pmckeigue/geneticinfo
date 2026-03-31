@@ -29,9 +29,8 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import queue as _queue_module
 import sys
-import threading
-from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import arviz as az
 import matplotlib.pyplot as plt
@@ -219,18 +218,23 @@ def _worker_nobar(args):
     return _worker_preloaded_lrpg(args)
 
 
-def _worker_with_progress(args):
+def _worker_with_queue(args):
     """
-    Like _worker_preloaded_lrpg but drives the step loop explicitly so that
-    tqdm can display a per-chain progress bar.  Runs in a thread (not a
-    subprocess) so that tqdm.auto shares the Jupyter context of the parent.
-    BLAS threads are already set in the parent process before this is called.
+    PG-Gibbs worker that sends progress updates to a multiprocessing.Queue.
+    Runs in a forked subprocess for true parallelism.  BLAS threads are
+    already set in the parent and inherited via fork.
 
-    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override)
+    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override, q)
+
+    Messages put on q:
+      ("step",  chain_id, delta, mu)  — advance bar by delta steps
+      ("phase", chain_id, label)      — change bar description
+      ("done",  chain_id)             — chain finished
     """
     chain_id, gb, y_perm, seed, cfg = args[:5]
     true_mu = args[5] if len(args) > 5 else float("nan")
     p_obs_override = args[6] if len(args) > 6 else None
+    q = args[7]
 
     rng = np.random.default_rng(seed)
     y_perm = np.asarray(y_perm, dtype=np.float64)
@@ -261,41 +265,36 @@ def _worker_with_progress(args):
 
     n_w = lr_cfg.n_warmup
     n_s = lr_cfg.n_samples
-    total = n_w + n_s
+    UPDATE_EVERY = 50
 
-    bar = tqdm(
-        total=total,
-        position=chain_id,
-        desc=f"chain {chain_id}  warmup ",
-        leave=True,
-        dynamic_ncols=True,
-    )
-
+    last = 0
     for i in range(n_w):
         sampler.step()
-        if i % 50 == 0:
-            bar.set_postfix(mu=f"{sampler.mu:.3f}", refresh=False)
-        bar.update(1)
+        if (i + 1) % UPDATE_EVERY == 0 or i == n_w - 1:
+            delta = (i + 1) - last
+            last = i + 1
+            q.put(("step", chain_id, delta, sampler.mu))
 
-    bar.set_description(f"chain {chain_id}  sample")
+    q.put(("phase", chain_id, "sample"))
 
     mu = np.empty(n_s, dtype=np.float64)
     beta0 = np.empty(n_s, dtype=np.float64)
     p = np.empty(n_s, dtype=np.float64)
     ll = np.empty(n_s, dtype=np.float64)
 
+    last = 0
     for t in range(n_s):
         sampler.step()
         mu[t] = sampler.mu
         beta0[t] = sampler.phi
         p[t] = sampler.current_p()
         ll[t] = bernoulli_loglik_logit_np(sampler.current_eta(), y_perm)
-        if t % 50 == 0:
-            bar.set_postfix(mu=f"{sampler.mu:.3f}", refresh=False)
-        bar.update(1)
+        if (t + 1) % UPDATE_EVERY == 0 or t == n_s - 1:
+            delta = (t + 1) - last
+            last = t + 1
+            q.put(("step", chain_id, delta, sampler.mu))
 
-    bar.set_postfix(mu=f"{mu.mean():.3f}")
-    bar.close()
+    q.put(("done", chain_id))
 
     return {
         "chain_id": int(chain_id),
@@ -456,27 +455,49 @@ def sample_posterior(
     #  - threads (progress_bar=True) share the same process-wide setting
     _set_blas_threads(n_blas_threads)
 
+    ctx = mp.get_context("fork")
     if progress_bar:
-        # Use threads so that tqdm.auto shares the Jupyter context of the
-        # parent and can update in-place.  BLAS ops release the GIL so threads
-        # get true parallelism for the dominant O(n³) BLAS/LAPACK calls.
+        # Workers run in forked subprocesses (true parallelism; BLAS threads
+        # inherited).  Progress is sent back to the parent via a Queue and the
+        # tqdm bars are managed here, so tqdm.auto works correctly in Jupyter.
+        progress_q = ctx.Queue()
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, progress_q)
             for cid in range(n_chains)
         ]
-        lock = threading.RLock()
-        tqdm.set_lock(lock)
-        with ThreadPoolExecutor(max_workers=n_chains) as executor:
-            chain_dicts = list(executor.map(_worker_with_progress, jobs))
+        bars = [
+            tqdm(total=n_warmup + n_samples, position=cid,
+                 desc=f"chain {cid}  warmup", leave=True, dynamic_ncols=True)
+            for cid in range(n_chains)
+        ]
+        with ctx.Pool(processes=n_chains) as pool:
+            async_result = pool.map_async(_worker_with_queue, jobs)
+            finished = 0
+            while finished < n_chains:
+                try:
+                    msg = progress_q.get(timeout=1.0)
+                    kind = msg[0]
+                    cid = msg[1]
+                    if kind == "step":
+                        delta, mu_val = msg[2], msg[3]
+                        bars[cid].update(delta)
+                        bars[cid].set_postfix(mu=f"{mu_val:.3f}", refresh=False)
+                    elif kind == "phase":
+                        bars[cid].set_description(f"chain {cid}  {msg[2]}")
+                    elif kind == "done":
+                        finished += 1
+                except _queue_module.Empty:
+                    pass
+        for bar in bars:
+            bar.close()
+        chain_dicts = async_result.get()
         print()  # newline after the stacked bars
     else:
-        # Use forked subprocesses; they inherit the parent's BLAS thread
-        # count set above.
+        # Forked subprocesses inherit the parent's BLAS thread count.
         jobs = [
             (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, False, False)
             for cid in range(n_chains)
         ]
-        ctx = mp.get_context("fork")
         with ctx.Pool(processes=n_chains) as pool:
             chain_dicts = pool.map(_worker_nobar, jobs)
 
