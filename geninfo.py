@@ -63,6 +63,10 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
+# Module-level queue used by _worker_with_queue.  Set in the parent process
+# before Pool creation so that forked workers inherit it without pickling.
+_POOL_PROGRESS_Q = None
+
 from tqdm.auto import tqdm
 
 from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
@@ -220,13 +224,13 @@ def _worker_nobar(args):
 
 def _worker_with_queue(args):
     """
-    PG-Gibbs worker that sends progress updates to a multiprocessing.Queue.
-    Runs in a forked subprocess for true parallelism.  BLAS threads are
-    already set in the parent and inherited via fork.
+    PG-Gibbs worker that sends progress updates to _POOL_PROGRESS_Q (a
+    module-level multiprocessing.Queue set in the parent before Pool creation
+    and inherited by forked workers without pickling).
 
-    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override, q)
+    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override)
 
-    Messages put on q:
+    Messages put on queue:
       ("step",  chain_id, delta, mu)  — advance bar by delta steps
       ("phase", chain_id, label)      — change bar description
       ("done",  chain_id)             — chain finished
@@ -234,7 +238,7 @@ def _worker_with_queue(args):
     chain_id, gb, y_perm, seed, cfg = args[:5]
     true_mu = args[5] if len(args) > 5 else float("nan")
     p_obs_override = args[6] if len(args) > 6 else None
-    q = args[7]
+    q = _POOL_PROGRESS_Q
 
     rng = np.random.default_rng(seed)
     y_perm = np.asarray(y_perm, dtype=np.float64)
@@ -457,25 +461,34 @@ def sample_posterior(
 
     ctx = mp.get_context("fork")
     if progress_bar:
-        # Workers run in forked subprocesses (true parallelism; BLAS threads
-        # inherited).  Progress is sent back to the parent via a Queue and the
-        # tqdm bars are managed here, so tqdm.auto works correctly in Jupyter.
-        progress_q = ctx.Queue()
+        # Set the module-level queue BEFORE creating the Pool so that forked
+        # workers inherit it directly (avoids pickling the Queue through the
+        # pool task pipe, which can deadlock).
+        global _POOL_PROGRESS_Q
+        _POOL_PROGRESS_Q = ctx.Queue()
+        print(f"  [debug] progress queue created", flush=True)
+
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, progress_q)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
             for cid in range(n_chains)
         ]
+        print(f"  [debug] jobs built ({len(jobs)} chains)", flush=True)
+
         bars = [
             tqdm(total=n_warmup + n_samples, position=cid,
                  desc=f"chain {cid}  warmup", leave=True, dynamic_ncols=True)
             for cid in range(n_chains)
         ]
+        print(f"  [debug] tqdm bars created, spawning Pool", flush=True)
+
         with ctx.Pool(processes=n_chains) as pool:
+            print(f"  [debug] Pool spawned, submitting map_async", flush=True)
             async_result = pool.map_async(_worker_with_queue, jobs)
+            print(f"  [debug] map_async submitted, entering monitor loop", flush=True)
             finished = 0
             while finished < n_chains:
                 try:
-                    msg = progress_q.get(timeout=1.0)
+                    msg = _POOL_PROGRESS_Q.get(timeout=1.0)
                     kind = msg[0]
                     cid = msg[1]
                     if kind == "step":
@@ -486,6 +499,7 @@ def sample_posterior(
                         bars[cid].set_description(f"chain {cid}  {msg[2]}")
                     elif kind == "done":
                         finished += 1
+                        print(f"  [debug] chain {cid} done ({finished}/{n_chains})", flush=True)
                 except _queue_module.Empty:
                     pass
         for bar in bars:
