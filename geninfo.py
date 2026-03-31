@@ -29,13 +29,15 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import arviz as az
 import matplotlib.pyplot as plt
 from collections import defaultdict
 from scipy.stats import gaussian_kde
 from scipy.sparse.csgraph import connected_components as _scipy_connected_components
-import sys
 from threadpoolctl import threadpool_limits
 
 
@@ -213,25 +215,22 @@ def _halfcauchy_pdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
 # ─── progress-bar worker ─────────────────────────────────────────────────────
 
 def _worker_nobar(args):
-    """No-progress-bar worker: sets BLAS threads then delegates."""
-    n_blas_threads = args[-1] if isinstance(args[-1], int) else 1
-    _set_blas_threads(n_blas_threads)
-    return _worker_preloaded_lrpg(args[:-1])
+    """No-progress-bar worker (BLAS threads already set in parent via fork)."""
+    return _worker_preloaded_lrpg(args)
 
 
 def _worker_with_progress(args):
     """
     Like _worker_preloaded_lrpg but drives the step loop explicitly so that
-    tqdm can display a per-chain progress bar.
+    tqdm can display a per-chain progress bar.  Runs in a thread (not a
+    subprocess) so that tqdm.auto shares the Jupyter context of the parent.
+    BLAS threads are already set in the parent process before this is called.
 
-    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override, n_blas_threads)
+    args: (chain_id, gb, y_perm, seed, cfg, true_mu, p_obs_override)
     """
     chain_id, gb, y_perm, seed, cfg = args[:5]
     true_mu = args[5] if len(args) > 5 else float("nan")
     p_obs_override = args[6] if len(args) > 6 else None
-    n_blas_threads = args[7] if len(args) > 7 else 1
-
-    _set_blas_threads(n_blas_threads)
 
     rng = np.random.default_rng(seed)
     y_perm = np.asarray(y_perm, dtype=np.float64)
@@ -452,19 +451,32 @@ def sample_posterior(
 
     p_obs = float(np.mean(y_perm))
 
-    jobs = [
-        (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, n_blas_threads)
-        for cid in range(n_chains)
-    ]
+    # Set BLAS threads in the parent process now so that:
+    #  - forked workers (progress_bar=False) inherit the setting via fork
+    #  - threads (progress_bar=True) share the same process-wide setting
+    _set_blas_threads(n_blas_threads)
 
-    ctx = mp.get_context("fork")
     if progress_bar:
-        lock = ctx.RLock()
-        with ctx.Pool(processes=n_chains,
-                      initializer=tqdm.set_lock, initargs=(lock,)) as pool:
-            chain_dicts = pool.map(_worker_with_progress, jobs)
+        # Use threads so that tqdm.auto shares the Jupyter context of the
+        # parent and can update in-place.  BLAS ops release the GIL so threads
+        # get true parallelism for the dominant O(n³) BLAS/LAPACK calls.
+        jobs = [
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
+            for cid in range(n_chains)
+        ]
+        lock = threading.RLock()
+        tqdm.set_lock(lock)
+        with ThreadPoolExecutor(max_workers=n_chains) as executor:
+            chain_dicts = list(executor.map(_worker_with_progress, jobs))
         print()  # newline after the stacked bars
     else:
+        # Use forked subprocesses; they inherit the parent's BLAS thread
+        # count set above.
+        jobs = [
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, False, False)
+            for cid in range(n_chains)
+        ]
+        ctx = mp.get_context("fork")
         with ctx.Pool(processes=n_chains) as pool:
             chain_dicts = pool.map(_worker_nobar, jobs)
 
