@@ -623,6 +623,7 @@ class ChainConfig:
     n_samples: int = 5000
     prior_loc: float = 1.0
     prior_scale: float = 0.75
+    mu_prior_df: float = 10.0   # degrees of freedom for half-Student-t prior on mu
     beta0_sd: float = 5.0
     slice_w: float = 1.5
     slice_m: int = 20

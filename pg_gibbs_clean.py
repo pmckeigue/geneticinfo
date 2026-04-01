@@ -408,15 +408,17 @@ def logpost_theta_given_z(
     theta: float,
     z: np.ndarray,
     mu_prior_scale: float,
+    mu_prior_df: float = 10.0,
 ) -> float:
     """
     Log posterior for theta=log(mu) given z (and r, but r drops out except const),
-    up to an additive constant. Uses Half-Cauchy prior on mu with given scale.
+    up to an additive constant.  Uses half-Student-t(df, scale) prior on mu.
 
     From z|r,mu ~ N(mu r, 2 mu I):
       log p(z|mu, r) = - (z^T z)/(4 mu) - (M/2) log(2 mu) - (M/4) mu + const
     Add Jacobian for mu=exp(theta): +theta
-    Add Half-Cauchy log prior on mu: -log(1+(mu/s)^2)
+    Add half-Student-t log prior on mu: -(df+1)/2 * log(1 + (mu/s)^2/df)
+    Half-Cauchy is the special case df=1.
     """
     mu = float(np.exp(theta))
     M = float(z.size)
@@ -425,8 +427,10 @@ def logpost_theta_given_z(
     # Likelihood term in mu (constants dropped)
     lp = -(z2 / (4.0 * mu)) - 0.5 * M * np.log(2.0 * mu) - 0.25 * M * mu
 
-    # Half-Cauchy(mu_prior_scale) prior on mu + Jacobian
-    lp += theta - np.log(1.0 + (mu / mu_prior_scale) ** 2)
+    # half-Student-t(df, scale) prior on mu + Jacobian for theta=log(mu)
+    df = float(mu_prior_df)
+    s  = float(mu_prior_scale)
+    lp += theta - 0.5 * (df + 1.0) * np.log(1.0 + (mu / s) ** 2 / df)
     return float(lp)
 
 
@@ -439,6 +443,7 @@ class SamplerConfig:
 
     beta0_sd: float = 5.0
     mu_prior_scale: float = 5.0
+    mu_prior_df: float = 10.0   # degrees of freedom for half-Student-t prior on mu
 
     # Slice sampling for theta=log(mu)
     slice_w: float = 0.5
@@ -516,7 +521,7 @@ class PGGibbsBlockSampler:
 
         # 5) Sample mu via theta=log(mu) | z (slice)
         def lp(th: float) -> float:
-            return logpost_theta_given_z(th, self.z, self.cfg.mu_prior_scale)
+            return logpost_theta_given_z(th, self.z, self.cfg.mu_prior_scale, self.cfg.mu_prior_df)
 
         self.theta = slice_sample_1d(
             self.rng,
@@ -598,7 +603,8 @@ def sampler_cfg_from_chain_cfg(cfg) -> "SamplerConfig":
         n_warmup=int(cfg.n_warmup),
         n_samples=int(cfg.n_samples),
         beta0_sd=float(cfg.beta0_sd),
-        mu_prior_scale=float(cfg.prior_scale),   # Half-Cauchy scale on mu
+        mu_prior_scale=float(cfg.prior_scale),
+        mu_prior_df=float(getattr(cfg, "mu_prior_df", 10.0)),
         slice_w=float(cfg.slice_w),
         slice_m=int(cfg.slice_m),
         #constrain_sum_z=bool(getattr(cfg, "project_affects_beta0", True)),
@@ -925,7 +931,8 @@ class LRBlockdiagPGConfig:
     # priors
     K_beta: float = 20.0                # same "K=20" as your numpyro model
     p_obs: float = 0.5                  # prior centre (full-sample observed case fraction)
-    mu_prior_scale: float = 1.0         # HalfCauchy scale
+    mu_prior_scale: float = 1.0         # half-Student-t scale
+    mu_prior_df: float = 10.0          # degrees of freedom (df=1 → half-Cauchy)
 
     # slice sampling settings
     slice_w_phi: float = 1.0
@@ -1058,9 +1065,10 @@ class LRDiscreteBlockdiagPGGibbs:
         M = float(self.Lblk.M)
         lp_Z = float(-0.5 * M * np.log(mu) - (diff @ diff) / (4.0 * mu))
 
-        # HalfCauchy(scale) prior on mu, in theta-space (add Jacobian +theta)
-        s = float(self.cfg.mu_prior_scale)
-        lp_mu = float(theta - np.log(1.0 + (mu / s) ** 2))
+        # half-Student-t(df, scale) prior on mu + Jacobian for theta=log(mu)
+        s  = float(self.cfg.mu_prior_scale)
+        df = float(self.cfg.mu_prior_df)
+        lp_mu = float(theta - 0.5 * (df + 1.0) * np.log(1.0 + (mu / s) ** 2 / df))
 
         return ll_aug + lp_Z + lp_mu
 
@@ -1090,7 +1098,8 @@ class LRDiscreteBlockdiagPGGibbs:
         # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
         mu_cache = build_mu_collapsed_cache(
             self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
-            mu_prior_scale=self.cfg.mu_prior_scale
+            mu_prior_scale=self.cfg.mu_prior_scale,
+            mu_prior_df=self.cfg.mu_prior_df,
         )
     
         def lp_theta(th: float) -> float:
@@ -1232,7 +1241,8 @@ def run_one_chain_preloaded_lrpg(
         n_samples=int(cfg.n_samples),
         K_beta=20.0,                           # matches your numpyro model
         p_obs=p_obs,
-        mu_prior_scale=float(cfg.prior_scale), # HalfCauchy scale
+        mu_prior_scale=float(cfg.prior_scale),
+        mu_prior_df=float(getattr(cfg, "mu_prior_df", 10.0)),
         slice_w_phi=float(cfg.slice_w),
         slice_m_phi=int(cfg.slice_m),
         slice_w_theta=float(cfg.slice_w),
@@ -1334,7 +1344,8 @@ class MuCollapsedCache:
     c2: float
 
     mbar: float               # tanh(phi/2)
-    mu_prior_scale: float     # HalfCauchy scale
+    mu_prior_scale: float     # half-Student-t scale
+    mu_prior_df: float        # degrees of freedom
 
 
 def build_mu_collapsed_cache(
@@ -1345,6 +1356,7 @@ def build_mu_collapsed_cache(
     phi: float,
     v_L1: np.ndarray,          # v = L @ 1
     mu_prior_scale: float,
+    mu_prior_df: float = 10.0,
 ) -> MuCollapsedCache:
     """
     Build cache for collapsed mu update: integrates out Zmix from the PG-Gaussian.
@@ -1417,6 +1429,7 @@ def build_mu_collapsed_cache(
         c0=c0, c1=c1, c2=c2,
         mbar=mbar,
         mu_prior_scale=float(mu_prior_scale),
+        mu_prior_df=float(mu_prior_df),
     )
 
 
@@ -1455,9 +1468,10 @@ def logpost_theta_mu_collapsed(theta: float, cache: MuCollapsedCache) -> float:
           - 0.25 * M * mu
           - 0.5 * M * np.log(2.0 * mu))
 
-    # Half-Cauchy(scale) prior on mu + Jacobian for theta
-    s = float(cache.mu_prior_scale)
-    lp += theta - np.log(1.0 + (mu / s) ** 2)
+    # half-Student-t(df, scale) prior on mu + Jacobian for theta=log(mu)
+    s  = float(cache.mu_prior_scale)
+    df = float(cache.mu_prior_df)
+    lp += theta - 0.5 * (df + 1.0) * np.log(1.0 + (mu / s) ** 2 / df)
 
     return float(lp)
 

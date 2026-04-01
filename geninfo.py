@@ -18,7 +18,7 @@ Model
   r_i in {-1, +1},  P(r_i=+1) = p  (discrete class indicator)
   z | r, mu ~ N(mu * r, 2*mu * I)
   p ~ Beta(K_beta * p_obs, K_beta * (1 - p_obs))
-  mu ~ HalfCauchy(mu_prior_scale)
+  mu ~ half-Student-t(df=mu_prior_df, scale=mu_prior_scale)   [df=1 → half-Cauchy]
 
 The key quantity mu equals Lambda (expected log-likelihood ratio in nats)
 and also equals log(lambda_S) where lambda_S is the sibling recurrence
@@ -260,12 +260,14 @@ def _make_chain_config(
     n_samples: int,
     mu_prior_scale: float,
     p_prior_conc: float,
+    mu_prior_df: float = 10.0,
 ) -> ChainConfig:
     return ChainConfig(
         n_warmup=n_warmup,
         n_samples=n_samples,
         prior_loc=0.0,
         prior_scale=mu_prior_scale,
+        mu_prior_df=mu_prior_df,
         beta0_sd=5.0,            # not used by LRDiscreteBlockdiagPGGibbs
         slice_w=1.5,
         slice_m=20,
@@ -278,9 +280,10 @@ def _make_chain_config(
     )
 
 
-def _halfcauchy_pdf(x: np.ndarray, scale: float = 1.0) -> np.ndarray:
+def _half_student_t_pdf(x: np.ndarray, scale: float = 1.0, df: float = 10.0) -> np.ndarray:
+    """Unnormalised half-Student-t pdf (positive half only, not normalised to 1)."""
     x = np.asarray(x, dtype=np.float64)
-    return 2.0 / (np.pi * scale * (1.0 + (x / scale) ** 2))
+    return (1.0 + (x / scale) ** 2 / df) ** (-0.5 * (df + 1.0))
 
 
 # ─── progress-bar worker ─────────────────────────────────────────────────────
@@ -320,6 +323,7 @@ def _worker_with_queue(args):
         K_beta=20.0,
         p_obs=p_obs,
         mu_prior_scale=float(cfg.prior_scale),
+        mu_prior_df=float(getattr(cfg, "mu_prior_df", 10.0)),
         slice_w_phi=float(cfg.slice_w),
         slice_m_phi=int(cfg.slice_m),
         slice_w_theta=float(cfg.slice_w),
@@ -436,6 +440,7 @@ def sample_posterior(
     progress_bar: bool = True,
     corr_threshold: float = 0.0,
     n_blas_threads: int | None = None,
+    mu_prior_df: float = 10.0,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -481,6 +486,10 @@ def sample_posterior(
         1500×1500 on MKL), so the default of 1 keeps all cores available
         for inter-chain parallelism.  Increase only if you have a single
         very large block and can spare threads from chain parallelism.
+    mu_prior_df : float
+        Degrees of freedom for the half-Student-t prior on mu.  Default 10.
+        df=1 recovers the half-Cauchy.  Larger df gives lighter tails and
+        stronger regularisation towards zero.
 
     Returns
     -------
@@ -510,7 +519,7 @@ def sample_posterior(
         gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
         _print_block_info(block_info)
 
-    cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc)
+    cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc, mu_prior_df)
 
     n_cpu = os.cpu_count() or 1
     if n_blas_threads is None:
@@ -587,6 +596,7 @@ def sample_posterior(
         "block_info": block_info,
         "cfg": cfg,
         "mu_prior_scale": mu_prior_scale,
+        "mu_prior_df": mu_prior_df,
     }
 
 
@@ -624,6 +634,7 @@ def summarize_and_plot(
     mu_chains = result["mu_chains"]          # (n_chains, n_samples)
     mu_all = result["mu_all"]
     scale = prior_scale if prior_scale is not None else result["mu_prior_scale"]
+    df    = float(result.get("mu_prior_df", 10.0))
 
     # ── summary statistics ──────────────────────────────────────────────────
     idata = az.convert_to_inference_data({"mu": mu_chains})
@@ -655,11 +666,12 @@ def summarize_and_plot(
     mu_max = max(4.0, float(np.percentile(mu_all, 99)) * 1.6)
     mu_grid = np.linspace(1e-4, mu_max, 600)
 
-    prior_d = _halfcauchy_pdf(mu_grid, scale)
+    prior_d = _half_student_t_pdf(mu_grid, scale, df)
+    prior_d /= np.trapezoid(prior_d, mu_grid)   # normalise for display
     post_d = gaussian_kde(mu_all)(mu_grid)
 
     # Likelihood ≈ posterior / prior (importance-weighted KDE), then normalise.
-    prior_at_samples = np.maximum(_halfcauchy_pdf(mu_all, scale), 1e-300)
+    prior_at_samples = np.maximum(_half_student_t_pdf(mu_all, scale, df), 1e-300)
     w = 1.0 / prior_at_samples
     w /= w.sum()
     lik_d = gaussian_kde(mu_all, weights=w)(mu_grid)
@@ -667,8 +679,9 @@ def summarize_and_plot(
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
-    ax.plot(mu_grid, prior_d, color="gray", lw=1.8, ls="--",
-            label=f"Prior  [half-Cauchy(scale={scale:.2g})]")
+    prior_label = (f"Prior  [half-Student-t(df={df:.4g}, scale={scale:.2g})]"
+                   if df != 1.0 else f"Prior  [half-Cauchy(scale={scale:.2g})]")
+    ax.plot(mu_grid, prior_d, color="gray", lw=1.8, ls="--", label=prior_label)
     ax.plot(mu_grid, post_d, color="steelblue", lw=2.2,
             label="Posterior")
     ax.plot(mu_grid, lik_d, color="firebrick", lw=2.0, ls="-.",
