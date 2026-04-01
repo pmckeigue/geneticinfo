@@ -680,12 +680,11 @@ def summarize_and_plot(
     # Log-likelihood: subtract max so peak = 0.
     log_lik = np.log(np.maximum(lik_d, 1e-300))
     log_lik -= log_lik.max()
-    # Mask to region where the posterior KDE is reliable (≥2% of its peak).
-    # Outside this region there are too few samples for the 1/prior weighting
-    # to give a trustworthy estimate.
-    reliable = post_d >= 0.02 * post_d.max()
+    # Mask to the 1%–99% quantile range of the posterior samples.
+    # Outside this range the 1/prior weighting is unreliable.
+    mu_lo, mu_hi = np.percentile(mu_all, [1.0, 99.0])
+    reliable = (mu_grid >= mu_lo) & (mu_grid <= mu_hi)
     log_lik_masked = np.where(reliable, log_lik, np.nan)
-    log_lik_min = float(np.nanmin(log_lik_masked))
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -694,16 +693,16 @@ def summarize_and_plot(
     ax.plot(mu_grid, prior_d, color="gray", lw=1.8, ls="--", label=prior_label)
     ax.plot(mu_grid, post_d, color="steelblue", lw=2.2, label="Posterior")
 
-    # Log-likelihood on right axis; max=0 placed at 90% of plot height.
+    # Log-likelihood on right axis; limits set from plotted values with 10% margin.
     ax2 = ax.twinx()
     ax2.plot(mu_grid, log_lik_masked, color="firebrick", lw=2.0, ls="-.",
              label="Log-likelihood")
     ax2.set_ylabel("Log-likelihood  (relative to max)", color="firebrick", fontsize=11)
     ax2.tick_params(axis="y", labelcolor="firebrick")
-    # Place peak (0) at 90% and actual minimum at 10% of the axis height.
-    # Solving: 0 = lo + 0.9*(hi-lo)  and  lk_min = lo + 0.1*(hi-lo)
-    # gives  lo = 9*lk_min/8,  hi = -lk_min/8
-    ax2.set_ylim(9.0 * log_lik_min / 8.0, -log_lik_min / 8.0)
+    lk_min = float(np.nanmin(log_lik_masked))
+    lk_max = float(np.nanmax(log_lik_masked))   # == 0 by construction
+    margin = 0.1 * (lk_max - lk_min)
+    ax2.set_ylim(lk_min - margin, lk_max + margin)
 
     if mu_true is not None:
         ax.axvline(mu_true, color="black", ls=":", lw=1.5,
