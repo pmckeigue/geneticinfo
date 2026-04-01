@@ -671,6 +671,8 @@ def summarize_and_plot(
     post_d = gaussian_kde(mu_all)(mu_grid)
 
     # Likelihood ≈ posterior / prior (importance-weighted KDE).
+    # Weight each posterior sample by 1/prior(mu); the resulting KDE estimates
+    # the likelihood up to a normalising constant.
     prior_at_samples = np.maximum(_half_student_t_pdf(mu_all, scale, df), 1e-300)
     w = 1.0 / prior_at_samples
     w /= w.sum()
@@ -678,7 +680,12 @@ def summarize_and_plot(
     # Log-likelihood: subtract max so peak = 0.
     log_lik = np.log(np.maximum(lik_d, 1e-300))
     log_lik -= log_lik.max()
-    log_lik_min = float(log_lik.min())
+    # Mask to region where the posterior KDE is reliable (≥1% of its peak).
+    # Outside this region there are too few samples for the 1/prior weighting
+    # to give a trustworthy estimate.
+    reliable = post_d >= 0.01 * post_d.max()
+    log_lik_masked = np.where(reliable, log_lik, np.nan)
+    log_lik_min = float(np.nanmin(log_lik_masked))
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -689,7 +696,7 @@ def summarize_and_plot(
 
     # Log-likelihood on right axis; max=0 placed at 90% of plot height.
     ax2 = ax.twinx()
-    ax2.plot(mu_grid, log_lik, color="firebrick", lw=2.0, ls="-.",
+    ax2.plot(mu_grid, log_lik_masked, color="firebrick", lw=2.0, ls="-.",
              label="Log-likelihood")
     ax2.set_ylabel("Log-likelihood  (relative to max)", color="firebrick", fontsize=11)
     ax2.tick_params(axis="y", labelcolor="firebrick")
