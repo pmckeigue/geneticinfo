@@ -700,9 +700,9 @@ def summarize_and_plot(
     ax2.set_ylabel("Log-likelihood  (relative to max)", color="firebrick", fontsize=11)
     ax2.tick_params(axis="y", labelcolor="firebrick")
     lk_min = float(np.nanmin(log_lik_masked))
-    lk_max = float(np.nanmax(log_lik_masked))   # == 0 by construction
-    margin = 0.1 * (lk_max - lk_min)
-    ax2.set_ylim(lk_min - margin, lk_max + margin)
+    margin = 0.1 * abs(lk_min)
+    # Upper limit is exactly 0 so the "0" tick coincides with the curve peak.
+    ax2.set_ylim(lk_min - margin, 0.0)
 
     if mu_true is not None:
         ax.axvline(mu_true, color="black", ls=":", lw=1.5,
