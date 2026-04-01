@@ -680,10 +680,10 @@ def summarize_and_plot(
     # Log-likelihood: subtract max so peak = 0.
     log_lik = np.log(np.maximum(lik_d, 1e-300))
     log_lik -= log_lik.max()
-    # Mask to region where the posterior KDE is reliable (≥1% of its peak).
+    # Mask to region where the posterior KDE is reliable (≥2% of its peak).
     # Outside this region there are too few samples for the 1/prior weighting
     # to give a trustworthy estimate.
-    reliable = post_d >= 0.01 * post_d.max()
+    reliable = post_d >= 0.02 * post_d.max()
     log_lik_masked = np.where(reliable, log_lik, np.nan)
     log_lik_min = float(np.nanmin(log_lik_masked))
 
