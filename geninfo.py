@@ -675,11 +675,10 @@ def summarize_and_plot(
     w = 1.0 / prior_at_samples
     w /= w.sum()
     lik_d = gaussian_kde(mu_all, weights=w)(mu_grid)
-    # Log-likelihood: subtract max so peak = 0; set floor at −10 for display.
+    # Log-likelihood: subtract max so peak = 0.
     log_lik = np.log(np.maximum(lik_d, 1e-300))
     log_lik -= log_lik.max()
-    log_lik_floor = -10.0
-    log_lik_display = np.maximum(log_lik, log_lik_floor)
+    log_lik_min = float(log_lik.min())
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -690,12 +689,14 @@ def summarize_and_plot(
 
     # Log-likelihood on right axis; max=0 placed at 90% of plot height.
     ax2 = ax.twinx()
-    ax2.plot(mu_grid, log_lik_display, color="firebrick", lw=2.0, ls="-.",
+    ax2.plot(mu_grid, log_lik, color="firebrick", lw=2.0, ls="-.",
              label="Log-likelihood")
     ax2.set_ylabel("Log-likelihood  (relative to max)", color="firebrick", fontsize=11)
     ax2.tick_params(axis="y", labelcolor="firebrick")
-    # Set limits so the peak (0) sits at ~90% of the axis height.
-    ax2.set_ylim(log_lik_floor / 0.9, 0 - log_lik_floor * (1.0 / 0.9 - 1.0))
+    # Place peak (0) at 90% and actual minimum at 10% of the axis height.
+    # Solving: 0 = lo + 0.9*(hi-lo)  and  lk_min = lo + 0.1*(hi-lo)
+    # gives  lo = 9*lk_min/8,  hi = -lk_min/8
+    ax2.set_ylim(9.0 * log_lik_min / 8.0, -log_lik_min / 8.0)
 
     if mu_true is not None:
         ax.axvline(mu_true, color="black", ls=":", lw=1.5,
