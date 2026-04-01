@@ -677,14 +677,14 @@ def summarize_and_plot(
     w = 1.0 / prior_at_samples
     w /= w.sum()
     lik_d = gaussian_kde(mu_all, weights=w)(mu_grid)
-    # Log-likelihood: subtract max so peak = 0.
     log_lik = np.log(np.maximum(lik_d, 1e-300))
-    log_lik -= log_lik.max()
     # Mask to the 1%–99% quantile range of the posterior samples.
     # Outside this range the 1/prior weighting is unreliable.
     mu_lo, mu_hi = np.percentile(mu_all, [1.0, 99.0])
     reliable = (mu_grid >= mu_lo) & (mu_grid <= mu_hi)
     log_lik_masked = np.where(reliable, log_lik, np.nan)
+    # Rescale so the maximum of the masked values is 0.
+    log_lik_masked -= np.nanmax(log_lik_masked)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -701,8 +701,8 @@ def summarize_and_plot(
     ax2.tick_params(axis="y", labelcolor="firebrick")
     lk_min = float(np.nanmin(log_lik_masked))
     margin = 0.1 * abs(lk_min)
-    # Upper limit is exactly 0 so the "0" tick coincides with the curve peak.
-    ax2.set_ylim(lk_min - margin, 0.0)
+    # 0 (the peak) sits just below the top; lower limit has a small margin.
+    ax2.set_ylim(lk_min - margin, margin)
 
     if mu_true is not None:
         ax.axvline(mu_true, color="black", ls=":", lw=1.5,
