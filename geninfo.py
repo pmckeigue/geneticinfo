@@ -670,22 +670,32 @@ def summarize_and_plot(
     prior_d /= np.trapezoid(prior_d, mu_grid)   # normalise for display
     post_d = gaussian_kde(mu_all)(mu_grid)
 
-    # Likelihood ≈ posterior / prior (importance-weighted KDE), then normalise.
+    # Likelihood ≈ posterior / prior (importance-weighted KDE).
     prior_at_samples = np.maximum(_half_student_t_pdf(mu_all, scale, df), 1e-300)
     w = 1.0 / prior_at_samples
     w /= w.sum()
     lik_d = gaussian_kde(mu_all, weights=w)(mu_grid)
-    lik_d /= np.trapezoid(lik_d, mu_grid)
+    # Log-likelihood: subtract max so peak = 0; set floor at −10 for display.
+    log_lik = np.log(np.maximum(lik_d, 1e-300))
+    log_lik -= log_lik.max()
+    log_lik_floor = -10.0
+    log_lik_display = np.maximum(log_lik, log_lik_floor)
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
     prior_label = (f"Prior  [half-Student-t(df={df:.4g}, scale={scale:.2g})]"
                    if df != 1.0 else f"Prior  [half-Cauchy(scale={scale:.2g})]")
     ax.plot(mu_grid, prior_d, color="gray", lw=1.8, ls="--", label=prior_label)
-    ax.plot(mu_grid, post_d, color="steelblue", lw=2.2,
-            label="Posterior")
-    ax.plot(mu_grid, lik_d, color="firebrick", lw=2.0, ls="-.",
-            label="Likelihood  (posterior / prior)")
+    ax.plot(mu_grid, post_d, color="steelblue", lw=2.2, label="Posterior")
+
+    # Log-likelihood on right axis; max=0 placed at 90% of plot height.
+    ax2 = ax.twinx()
+    ax2.plot(mu_grid, log_lik_display, color="firebrick", lw=2.0, ls="-.",
+             label="Log-likelihood")
+    ax2.set_ylabel("Log-likelihood  (relative to max)", color="firebrick", fontsize=11)
+    ax2.tick_params(axis="y", labelcolor="firebrick")
+    # Set limits so the peak (0) sits at ~90% of the axis height.
+    ax2.set_ylim(log_lik_floor / 0.9, 0 - log_lik_floor * (1.0 / 0.9 - 1.0))
 
     if mu_true is not None:
         ax.axvline(mu_true, color="black", ls=":", lw=1.5,
@@ -700,6 +710,11 @@ def summarize_and_plot(
     )
     ax.set_title(plot_title, fontsize=11)
 
+    # Combined legend from both axes.
+    lines1, labels1 = ax.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax.legend(lines1 + lines2, labels1 + labels2, fontsize=9)
+
     ax.text(
         0.97, 0.95,
         f"median = {median_mu:.3f}\n"
@@ -710,7 +725,6 @@ def summarize_and_plot(
         bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85),
     )
 
-    ax.legend(fontsize=9)
     ax.set_xlim(0, mu_max)
     ax.set_ylim(bottom=0)
     fig.tight_layout()
