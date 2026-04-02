@@ -33,11 +33,11 @@ dx_upload('${SCRIPT_LOCAL}', '/${REMOTE_FOLDER}/')
 
 # Check if results already exist
 check_existing_results() {
-    count=$(dx find data --name "compressed_model.npz" --path ${REMOTE_PHENO_DIR} --brief 2>/dev/null | wc -l)
+    count=$(dx find data --name "results_${PHENO}.npz" --path ${REMOTE_PHENO_DIR} --brief 2>/dev/null | wc -l)
     if [ "$count" -gt 1 ]; then
         echo "Warning: Found $count duplicates, will download"
         return 1
-    elif dx ls "${REMOTE_PHENO_DIR}/compressed_model.npz" >/dev/null 2>&1; then
+    elif dx ls "${REMOTE_PHENO_DIR}/results_${PHENO}.npz" >/dev/null 2>&1; then
         echo "Results already exist for ${PHENO} in ${REMOTE_PHENO_DIR}"
         return 0
     fi
@@ -56,7 +56,7 @@ run_job() {
     JOB_OUTPUT=$(dx run swiss-army-knife \
         -iin="${REMOTE_FOLDER}/${SCRIPT_NAME}" \
         -isnapshot=".Notebook_snapshots/snapshot-jupyterlab-pheno.tar.gz" \
-        -icmd="python3 ${SCRIPT_NAME}"  \
+        -icmd="python3 ${SCRIPT_NAME} ${PHENO}"  \
         --yes --brief --destination="${REMOTE_PHENO_DIR}/" \
         --instance-type=${INSTANCE_TYPE} \
         --priority=${priority} \
@@ -122,8 +122,8 @@ main() {
     
     echo "Downloading results..."
     mkdir -p summarylevel_results/${PHENO}
-    dx download "${REMOTE_PHENO_DIR}/compressed_model.npz" -o summarylevel_results/${PHENO} -f
-    dx download "${REMOTE_PHENO_DIR}/posterior_RA.png"     -o summarylevel_results/${PHENO} -f
+    dx download "${REMOTE_PHENO_DIR}/results_${PHENO}.npz"   -o summarylevel_results/${PHENO} -f
+    dx download "${REMOTE_PHENO_DIR}/posterior_${PHENO}.png" -o summarylevel_results/${PHENO} -f
 
     echo "Done! Results saved to ./summarylevel_results/${PHENO}/"
 }
