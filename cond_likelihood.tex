@@ -1,0 +1,132 @@
+\documentclass[12pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{bm}
+\usepackage{parskip}
+
+\title{Conditional likelihood for a matched case-control block}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Setup}
+
+Consider a stratum (family block) of $n$ individuals with genotypic values
+$G_1,\ldots,G_n$.  Each individual has binary outcome $y_i \in \{0,1\}$, with
+$m = \sum_i y_i$ cases.  The logistic model gives
+\[
+  P(y_i = 1 \mid G_i) = \sigma(\beta_0 + G_i)
+  \;=\;
+  \frac{e^{\beta_0 + G_i}}{1 + e^{\beta_0 + G_i}},
+\]
+where $\sigma$ is the logistic function and $\beta_0$ is the intercept
+(log-odds for an individual with $G_i = 0$).
+
+\section*{Conditional likelihood}
+
+Conditioning on the observed stratum total $\sum_i y_i = m$ gives
+\begin{equation}
+  P\!\left(\bm{y} \;\Big|\; \sum_i y_i = m,\; G_1,\ldots,G_n\right)
+  \;=\;
+  \frac{\displaystyle\prod_{i=1}^n \left[\sigma(\beta_0+G_i)\right]^{y_i}
+        \left[1-\sigma(\beta_0+G_i)\right]^{1-y_i}}
+       {\displaystyle\sum_{\mathcal{S}\,:\,|\mathcal{S}|=m}
+        \prod_{i\in\mathcal{S}} \sigma(\beta_0+G_i)
+        \prod_{i\notin\mathcal{S}} \left[1-\sigma(\beta_0+G_i)\right]}.
+\end{equation}
+
+Writing $\sigma(\beta_0+G_i)/(1-\sigma(\beta_0+G_i)) = e^{\beta_0+G_i}$,
+the numerator is
+\[
+  \prod_{i=1}^n \frac{e^{(\beta_0+G_i)y_i}}{1+e^{\beta_0+G_i}}
+  \;\propto\;
+  \exp\!\left(\beta_0 m + \sum_{i:\,y_i=1} G_i\right)
+  \prod_{i=1}^n \frac{1}{1+e^{\beta_0+G_i}},
+\]
+and each term in the denominator sum is
+\[
+  \prod_{i\in\mathcal{S}}\frac{e^{\beta_0+G_i}}{1+e^{\beta_0+G_i}}
+  \prod_{i\notin\mathcal{S}}\frac{1}{1+e^{\beta_0+G_i}}
+  \;\propto\;
+  \exp\!\left(\beta_0 m + \sum_{i\in\mathcal{S}} G_i\right)
+  \prod_{i=1}^n \frac{1}{1+e^{\beta_0+G_i}}.
+\]
+
+The shared factor $e^{\beta_0 m}\prod_i(1+e^{\beta_0+G_i})^{-1}$ cancels, leaving
+\begin{equation}
+  \boxed{
+  P\!\left(\bm{y} \;\Big|\; \sum_i y_i = m,\; \bm{G}\right)
+  \;=\;
+  \frac{\exp\!\left(\displaystyle\sum_{i:\,y_i=1} G_i\right)}
+       {\displaystyle\sum_{\mathcal{S}\,:\,|\mathcal{S}|=m}
+        \exp\!\left(\displaystyle\sum_{i\in\mathcal{S}} G_i\right)}.
+  }
+\end{equation}
+
+The intercept $\beta_0$ (and hence the prevalence) has cancelled completely.
+The likelihood depends only on the \emph{relative} genotypic values within the
+stratum.
+
+\section*{Concordant blocks}
+
+If $m = 0$ (all controls) or $m = n$ (all cases), the denominator sum contains
+only one term, which equals the numerator, so the conditional likelihood is~1
+and the log-likelihood contribution is~0.  Concordant blocks carry no
+information about $\bm{G}$.
+
+\section*{Discordant pairs ($n = 2$, $m = 1$)}
+
+Label the case as individual~1 and the control as individual~2.  There are
+$\binom{2}{1} = 2$ subsets in the denominator:
+
+\[
+  P(y_1=1, y_2=0 \mid m=1, G_1, G_2)
+  \;=\;
+  \frac{e^{G_1}}{e^{G_1}+e^{G_2}}
+  \;=\;
+  \sigma(G_1 - G_2).
+\]
+
+The log-likelihood is
+\[
+  \ell_{\text{pair}} \;=\; G_1 - \log\!\left(e^{G_1}+e^{G_2}\right)
+  \;=\; \log\sigma(G_1-G_2).
+\]
+This is identical to the Cox partial likelihood contribution for a stratum with
+one event and one non-event.
+
+\section*{Triplets ($n = 3$)}
+
+\subsection*{One case ($m = 1$), label case as individual~1}
+
+\[
+  P(y_1=1, y_2=0, y_3=0 \mid m=1, \bm{G})
+  \;=\;
+  \frac{e^{G_1}}{e^{G_1}+e^{G_2}+e^{G_3}}.
+\]
+
+\subsection*{Two cases ($m = 2$), labels cases as individuals~1 and~2}
+
+There are $\binom{3}{2} = 3$ subsets:
+
+\[
+  P(y_1=1,y_2=1,y_3=0 \mid m=2, \bm{G})
+  \;=\;
+  \frac{e^{G_1+G_2}}
+       {e^{G_1+G_2}+e^{G_1+G_3}+e^{G_2+G_3}}.
+\]
+
+\section*{Connection to the genetic model}
+
+Under the infinitesimal model, the genotypic values $\bm{G} = s\,\bm{L}\bm{z}$,
+where $\bm{L}$ is the Cholesky factor of the genetic relationship matrix (GRM)
+and $\bm{z} \sim \mathcal{N}(\bm{0}, \bm{I})$.  The marginal variance of each
+$G_i$ is $s^2$, and the pairwise covariance is $s^2 A_{ij}$ where $A_{ij}$ is
+the kinship coefficient.  The genetic information parameter is
+$\mu = \tfrac{1}{2}s^2$.  Within a sib pair ($A_{ij} = 0.5$), the difference
+$G_1 - G_2 \sim \mathcal{N}(0, s^2)$, so the log-likelihood of a discordant
+pair has mean~0 and variance $s^2 = 2\mu$ under the model.
+
+\end{document}

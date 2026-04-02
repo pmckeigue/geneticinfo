@@ -33,7 +33,7 @@ N_UNRELATED      = 4_000
 print("=" * 60)
 print("Simulating case-control dataset ...")
 print("=" * 60)
-from geneticinfo import simulate_casecontrol_related, print_casecontrol_summary
+from geneticinfo_functions import simulate_casecontrol_related, print_casecontrol_summary
 y_sample, A_sample, L_sample, info, g_sample = simulate_casecontrol_related(
     n_fullsib_pairs=N_FULLSIB_PAIRS,
     n_fullsib_trips=N_FULLSIB_TRIPS,
@@ -186,7 +186,7 @@ import jax.numpy as jnp
 from jax import random
 import numpyro
 from numpyro.infer import MCMC, NUTS, DiscreteHMCGibbs
-from geneticinfo import lr_discrete_blockdiag
+from geneticinfo_functions import lr_discrete_blockdiag
 
 NUM_CHAINS_HMC = 4
 numpyro.set_host_device_count(NUM_CHAINS_HMC)

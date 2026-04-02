@@ -1,0 +1,429 @@
+---
+title: "Pólya-Gamma Gibbs Sampler for Genetic Information Estimation"
+subtitle: "Derivation from First Principles"
+author: "Paul McKeigue"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    keep_tex: false
+header-includes:
+  - \usepackage{amsmath,amssymb,bm}
+  - \usepackage{algorithm}
+  - \usepackage{algpseudocode}
+  - \usepackage{booktabs}
+  - \newcommand{\mb}[1]{\mathbf{#1}}
+  - \newcommand{\E}{\mathbb{E}}
+  - \newcommand{\Var}{\mathrm{Var}}
+  - \newcommand{\N}{\mathcal{N}}
+  - \newcommand{\tr}{\mathrm{tr}}
+  - \newcommand{\logit}{\mathrm{logit}}
+  - \newcommand{\sgm}{\sigma}
+  - \DeclareMathOperator*{\lse}{logsumexp}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Background
+
+## Genetic information for discrimination
+
+The quantity of interest is $\mu$, the expected log-likelihood ratio (in nats) favouring case over control status given genetic risk—also called the *genetic information for discrimination* (McKeigue 2019). Under the two-component mixture model described here, $\mu = \log \lambda_S$ where $\lambda_S$ is the sibling recurrence risk ratio.
+
+## Reduction to relatives
+
+All inference uses only the $M_\text{rel}$ individuals who are related to at least one other sampled individual (singletons contribute no information about $\lambda_S$ and are discarded). The genetic relationship is encoded via the Cholesky factor $\mb{L}$ of the kinship matrix, decomposed into independent blocks $b = 1,\ldots,B$ corresponding to family units (sib pairs, triplets, etc.) of sizes $s_b$.
+
+---
+
+# The Probability Model
+
+The model for `lr_discrete_blockdiag` (fitted by DiscreteHMCGibbs) is as follows. All $M_\text{rel}$ relatives are indexed $i = 1,\ldots,M_\text{rel}$; block $b$ contains individuals $\mathcal{I}_b$ with $|\mathcal{I}_b| = s_b$.
+
+## Priors
+
+\begin{align}
+p &\sim \mathrm{Beta}(K p_\text{obs},\; K(1-p_\text{obs})), \quad K = 20 \label{eq:p-prior}\\
+\beta_0 &= \logit(p) \label{eq:beta0-def}\\
+\mu &\sim \mathrm{HalfCauchy}(1) \label{eq:mu-prior}
+\end{align}
+
+Here $p_\text{obs}$ is the observed case proportion in the full sample (0.5 for 1:1 case-control), and $p$ is the probability that any individual belongs to the high-risk class. The constraint $K=20$ gives $\mathrm{Beta}(10,10)$ at 1:1 case-control, centring $p$ at 0.5 with $\mathrm{SD} \approx 0.11$.
+
+## Latent variables
+
+For each individual $i$ in block $b$:
+
+\begin{align}
+r_i \mid p &\sim \mathrm{Bernoulli}(p), \quad r_i \in \{-1, +1\} \label{eq:r-prior}
+\end{align}
+
+where we use the $\pm 1$ encoding: $r_i = +1$ means individual $i$ is in the high-risk class.
+
+\begin{align}
+Z_{\text{mix},i} \mid r_i, \mu &\sim \N\!\left(r_i \mu,\; 2\mu\right) \label{eq:Zmix}
+\end{align}
+
+The *centred* parameterisation used for computation is:
+\begin{align}
+Z_i &= Z_{\text{mix},i} - (2p - 1)\mu \label{eq:Z-centred}
+\end{align}
+
+so that $Z_i \mid r_i, p, \mu \sim \N\!\bigl((r_i - (2p-1))\mu,\; 2\mu\bigr)$.
+
+## Genetic effects and likelihood
+
+For block $b$ with Cholesky factor $\mb{L}_b \in \mathbb{R}^{s_b \times s_b}$ (lower triangular):
+\begin{align}
+\mb{G}_b &= \mb{L}_b \mb{Z}_b \label{eq:G}
+\end{align}
+
+The observed binary outcomes $y_i \in \{0,1\}$ satisfy:
+\begin{align}
+y_i \mid \beta_0, G_i &\sim \mathrm{Bernoulli}\!\left(\sigma(\beta_0 + G_i)\right) \label{eq:likelihood}
+\end{align}
+
+where $\sigma(x) = (1 + e^{-x})^{-1}$.
+
+## Summary of joint distribution
+
+\begin{equation}
+p(\mb{y}, \mb{r}, \mb{Z}_\text{mix}, \mu, p) = p(\mu)\,p(p) \prod_{i} P(r_i \mid p)\,p(Z_{\text{mix},i} \mid r_i, \mu)\,p(y_i \mid \beta_0, G_i)
+\end{equation}
+
+The key parameters of interest are $\mu$ and $p$.
+
+---
+
+# DiscreteHMCGibbs Algorithm
+
+DiscreteHMCGibbs (Nishihara & Liang 2014, as implemented in NumPyro) alternates between:
+
+1. **Discrete step**: enumerate over all $2^{M_\text{rel}}$ configurations of $\mb{r}$ to compute exact marginal probabilities $P(r_i = +1 \mid \text{continuous params})$, then sample $\mb{r}$.
+2. **Continuous step**: given the sampled $\mb{r}$, run NUTS to jointly update $(\mu, p, \mb{Z}_\text{mix})$ using gradients of the log posterior.
+
+\begin{algorithm}[H]
+\caption{DiscreteHMCGibbs for \texttt{lr\_discrete\_blockdiag}}
+\begin{algorithmic}[1]
+\State \textbf{Initialise} $\mu^{(0)}, p^{(0)}, \mb{Z}_\text{mix}^{(0)}, \mb{r}^{(0)}$
+\For{$t = 1, 2, \ldots$}
+  \State \textbf{// Discrete step: sample $\mb{r}$ by exact block-wise enumeration}
+  \For{each block $b$}
+    \State Compute $\log w(r_b)$ for all $2^{s_b}$ configurations of $\mb{r}_b$:
+    \[
+      \log w(\mb{r}_b) = \sum_{i \in \mathcal{I}_b} \log p(y_i \mid \beta_0, G_i) + \sum_{i \in \mathcal{I}_b} \log P(r_i \mid p) + \log p(Z_{\text{mix},i} \mid r_i, \mu)
+    \]
+    \State Sample $\mb{r}_b^{(t)} \sim \mathrm{Categorical}\!\left(\mathrm{softmax}\{\log w(\mb{r}_b)\}\right)$
+  \EndFor
+  \State \textbf{// Continuous step: NUTS update of $(\mu, p, \mb{Z}_\text{mix})$}
+  \State Run NUTS targeting $\log p(\mu, p, \mb{Z}_\text{mix} \mid \mb{y}, \mb{r}^{(t)})$
+  \State Store samples $\mu^{(t)}, p^{(t)}, \mb{Z}_\text{mix}^{(t)}$
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+**Strengths**: NUTS exploits gradient information to move efficiently through the joint continuous space, overcoming the correlation between $\mu$ and $\mb{Z}_\text{mix}$. The discrete step marginalises $\mb{r}$ exactly per-block.
+
+**Weakness**: Requires JAX/GPU; each NUTS leapfrog step recomputes $\mb{G} = \mb{L}\mb{Z}$ for all blocks and all enumerated $\mb{r}$ configurations, making it expensive.
+
+---
+
+# Pólya-Gamma Data Augmentation
+
+## The key identity
+
+The Pólya-gamma augmentation of Polson, Scott and Windle (2013) is based on the identity:
+\begin{equation}
+\frac{e^{\kappa \eta}}{(1 + e^\eta)^n} = \frac{1}{2^n} e^{\kappa \eta} \int_0^\infty e^{-\omega \eta^2 / 2}\, p(\omega)\, d\omega
+\end{equation}
+
+where $\omega \sim \mathrm{PG}(n, 0)$ and $\kappa = y - n/2$. This means that, conditional on $\omega_i \sim \mathrm{PG}(1, |\eta_i|)$ where $\eta_i = \beta_0 + G_i$, the logistic likelihood is proportional to a Gaussian in $\eta_i$:
+
+\begin{equation}
+p(y_i \mid \omega_i, \eta_i) \propto \exp\!\left(\kappa_i \eta_i - \tfrac{\omega_i}{2} \eta_i^2\right), \quad \kappa_i = y_i - \tfrac{1}{2}
+\label{eq:pg-lik}
+\end{equation}
+
+This is Gaussian in $\eta_i = \beta_0 + [\mb{L}\mb{Z}]_i$, hence in $\mb{Z}$.
+
+## Augmented joint model
+
+Introduce auxiliary variables $\omega_i \sim \mathrm{PG}(1, |\eta_i|)$ for $i = 1,\ldots,M_\text{rel}$. The augmented joint density factorises as:
+
+\begin{equation}
+p(\mb{y}, \bm{\omega}, \mb{r}, \mb{Z}, \mu, p) = p(\mu)\,p(p) \prod_i P(r_i \mid p)\,p(Z_i \mid r_i, p, \mu)\,p(\omega_i \mid \eta_i)\,p(y_i \mid \omega_i, \eta_i)
+\label{eq:augmented}
+\end{equation}
+
+The augmented likelihood $p(y_i \mid \omega_i, \eta_i)$ is Gaussian in $\eta_i$ (equation \ref{eq:pg-lik}), enabling closed-form Gaussian updates for $\mb{Z}$.
+
+---
+
+# Derivation of Full Conditionals
+
+## Notation
+
+For block $b$ of size $s_b$, let:
+- $\mb{W}_b = \mathrm{diag}(\omega_b)$, where $\bm{\omega}_b = (\omega_i)_{i \in \mathcal{I}_b}$
+- $\bm{\kappa}_b = (\kappa_i)_{i \in \mathcal{I}_b}$ with $\kappa_i = y_i - \frac{1}{2}$
+- $\tau = \frac{1}{2\mu}$ (prior precision on each $Z_i$)
+- $\mb{m}_b(\mb{r}_b) = \bigl((r_i - (2p-1))\mu\bigr)_{i \in \mathcal{I}_b}$ (prior mean of $\mb{Z}_b$ given $\mb{r}_b$)
+- $c_c = \frac{2p-1}{2}$ (centering correction)
+
+The prior on $\mb{Z}_b$ given $\mb{r}_b$:
+\begin{equation}
+\mb{Z}_b \mid \mb{r}_b, p, \mu \sim \N\!\left(\mb{m}_b(\mb{r}_b),\; \tau^{-1}\mb{I}\right)
+\label{eq:Z-prior}
+\end{equation}
+
+with $\mb{m}_b(\mb{r}_b) = (r_i - (2p-1))\mu \cdot \mb{1}$ (element-wise).
+
+## Full conditional for $\mb{Z}_b$
+
+The log conditional density of $\mb{Z}_b$ given all other variables is proportional to (combining PG likelihood \ref{eq:pg-lik} and prior \ref{eq:Z-prior}):
+
+\begin{align}
+\log p(\mb{Z}_b \mid \bm{\omega}_b, \mb{r}_b, \beta_0, \mu) &\propto
+\sum_{i \in \mathcal{I}_b} \left[\kappa_i(\beta_0 + [\mb{L}_b \mb{Z}_b]_i) - \tfrac{\omega_i}{2}(\beta_0 + [\mb{L}_b \mb{Z}_b]_i)^2\right] \notag \\
+&\quad - \tfrac{\tau}{2}\|\mb{Z}_b - \mb{m}_b\|^2
+\end{align}
+
+Collecting terms in $\mb{Z}_b$:
+
+\begin{align}
+&= \mb{b}_b(\mb{r}_b)^\top \mb{Z}_b - \tfrac{1}{2}\mb{Z}_b^\top \mb{A}_b \mb{Z}_b + \text{const}
+\end{align}
+
+where:
+\begin{align}
+\mb{A}_b &= \mb{L}_b^\top \mb{W}_b \mb{L}_b + \tau\,\mb{I} \label{eq:Ab}\\
+\mb{b}_b(\mb{r}_b) &= \mb{L}_b^\top(\bm{\kappa}_b - \mb{W}_b \beta_0\,\mb{1}) + \tfrac{1}{2}\mb{r}_b - c_c\,\mb{1} \label{eq:bb}
+\end{align}
+
+Note that $\tfrac{1}{2}\mb{r}_b - c_c\,\mb{1} = \tau\,\mb{m}_b(\mb{r}_b)$ (the prior natural parameter).
+
+The full conditional is therefore:
+\begin{equation}
+\boxed{\mb{Z}_b \mid \bm{\omega}_b, \mb{r}_b, \beta_0, \mu \sim \N\!\left(\mb{A}_b^{-1}\mb{b}_b(\mb{r}_b),\; \mb{A}_b^{-1}\right)}
+\label{eq:Z-fc}
+\end{equation}
+
+This is sampled via Cholesky decomposition $\mb{L}_c = \mathrm{chol}(\mb{A}_b)$: draw $\mb{u} \sim \N(\mb{0}, \mb{I})$ then set $\mb{Z}_b = \mb{L}_c^{-\top}\mb{u} + \mb{A}_b^{-1}\mb{b}_b$.
+
+## Marginal log-likelihood for a block
+
+Integrating $\mb{Z}_b$ out of the augmented likelihood $\times$ prior:
+
+\begin{align}
+\log p(\mb{y}_b \mid \bm{\omega}_b, \mb{r}_b, \beta_0, \mu) &= \text{const}(\bm{\omega}_b, \beta_0)
++ \tfrac{1}{2}\|\mb{L}_c^{-1}\mb{b}_b(\mb{r}_b)\|^2 \notag\\
+&\quad - \tfrac{1}{2}\log\det\mb{A}_b
+- \mu\,C_b(\mb{r}_b)
+- \tfrac{s_b}{2}\log(2\mu)
+\label{eq:marglik}
+\end{align}
+
+where the *centering norm*:
+\begin{equation}
+C_b(\mb{r}_b) = \sum_{i \in \mathcal{I}_b} \left[(r_i = +1)(1-p)^2 + (r_i = -1)p^2\right]
+= n_+^{(b)}(1-p)^2 + n_-^{(b)}p^2
+\label{eq:Cnorm}
+\end{equation}
+arises from $\tfrac{1}{2}\mb{m}_b^\top(\tau\,\mb{I})\mb{m}_b = \mu\,C_b(\mb{r}_b)$, and the $-\tfrac{s_b}{2}\log(2\mu)$ term arises from the prior normalisation $\tau^{s_b/2} = (2\mu)^{-s_b/2}$.
+
+**Note**: The $\mu\,C_b(\mb{r}_b)$ term penalises $\mu$ and depends on the $\mb{r}_b$ configuration; it is essential for the correct collapsed update of both $\mb{r}$ and $\theta = \log\mu$.
+
+## Full conditional for $\mb{r}_b$
+
+From equation \eqref{eq:marglik}, the log weight for state $\mb{r}_b \in \{-1,+1\}^{s_b}$:
+
+\begin{equation}
+\boxed{\log w(\mb{r}_b) = \tfrac{1}{2}\|\mb{L}_c^{-1}\mb{b}_b(\mb{r}_b)\|^2 - \mu\,C_b(\mb{r}_b) + n_+^{(b)}\log p + n_-^{(b)}\log(1-p)}
+\label{eq:r-logweight}
+\end{equation}
+
+The distribution over the $2^{s_b}$ states is $P(\mb{r}_b) \propto \exp[\log w(\mb{r}_b)]$, normalised by softmax.
+
+**Critical remark**: The $-\mu\,C_b(\mb{r}_b)$ term is *absent* from simpler formulations that use the non-centred parameterisation $Z_{\text{mix},i} \sim \N(r_i\mu, 2\mu)$—because in that case $\tfrac{1}{2}\mb{m}_b^\top\tau\mb{m}_b = \mu/4 \cdot s_b$ is constant across $\mb{r}_b$ states and cancels. The term is necessary in the centred parameterisation and also creates a $\mu$–$\mb{r}$ dependence that must be handled correctly in the $\theta$ update (see Section \ref{sec:theta}).
+
+## Full conditional for $\omega_i$
+
+By the Pólya-gamma updating formula (Polson et al. 2013):
+\begin{equation}
+\omega_i \mid \eta_i \sim \mathrm{PG}\!\left(1,\; |\eta_i|\right), \quad \eta_i = \beta_0 + G_i = \beta_0 + [\mb{L}_b\mb{Z}_b]_i
+\label{eq:omega-fc}
+\end{equation}
+
+## Full conditional for $\beta_0$
+
+The log conditional (slice-sampled because of the nonlinear centering term):
+
+\begin{align}
+\log p(\beta_0 \mid \bm{\omega}, \mb{r}, \mb{Z}_\text{mix}, \mb{y}) &\propto
+(K p_\text{obs} + n_+)\,\beta_0 - (K + M_\text{rel})\log(1 + e^{\beta_0}) \notag\\
+&\quad + \sum_i \left[\kappa_i\,\hat{\eta}_i(\beta_0) - \tfrac{\omega_i}{2}\hat{\eta}_i(\beta_0)^2\right]
+\label{eq:beta0-fc}
+\end{align}
+
+where $n_+ = \sum_i \mathbf{1}[r_i = +1]$ is the class count and:
+\begin{equation}
+\hat{\eta}_i(\beta_0) = \beta_0 + \hat{G}_i - \bigl(2\sigma(\beta_0) - 1\bigr)\mu\,c_i
+\end{equation}
+with $\hat{G}_i = [\mb{L}_b\mb{Z}_{\text{mix},b}]_i$ (the genetic effect based on $\mb{Z}_\text{mix}$, which does not depend on $\beta_0$), and $c_i = [\mb{L}_b\mb{1}]_i$ the row-sum of the block Cholesky factor. The nonlinear $\beta_0$ dependence comes from the centering: $Z_i = Z_{\text{mix},i} - (2p-1)\mu$, so changing $\beta_0$ (hence $p = \sigma(\beta_0)$) shifts all $\eta_i$.
+
+## Fully collapsed log-posterior for $\theta = \log\mu$ \label{sec:theta}
+
+The key insight for the $\theta$ update is to **marginalise over $\mb{r}$ exactly** using the block-decomposable structure, computing:
+
+\begin{align}
+\log p(\theta \mid \bm{\omega}, \mb{y}, \beta_0) &= \log p(\theta) \notag\\
+&\quad + \sum_b \underbrace{\log\!\sum_{\mb{r}_b \in \{-1,+1\}^{s_b}} P(\mb{r}_b \mid p)\,\exp\!\left[\tfrac{1}{2}\|\mb{L}_c^{-1}\mb{b}_b(\mb{r}_b)\|^2 - \mu\,C_b(\mb{r}_b)\right]}_{\log Z_b(\theta)} \notag\\
+&\quad - \tfrac{1}{2}\sum_b \log\det\mb{A}_b(\tau) - \tfrac{M_\text{rel}}{2}\log(2\mu)
+\label{eq:theta-fc}
+\end{align}
+
+where all terms depend on $\theta$ through $\tau = e^{-\theta}/2 = 1/(2\mu)$, and:
+- $\mb{A}_b(\tau) = \mb{L}_b^\top\mb{W}_b\mb{L}_b + \tau\,\mb{I}$ varies with $\tau$
+- The block normalisation $\log Z_b(\theta)$ is a logsumexp over $2^{s_b}$ states (4 for pairs, 8 for triplets)
+- $\mb{b}_b(\mb{r}_b)$ varies with both $\tau$ (through $\mb{A}_b$) and $\mb{r}_b$
+
+Marginalising over $\mb{r}$ in \eqref{eq:theta-fc} **breaks the $\mu$–$\mb{r}$ feedback loop** that causes convergence failure when $\theta$ is updated conditioning on the sampled $\mb{r}$.
+
+For efficient evaluation, use the eigendecomposition $\mb{A}_b = \mb{V}_b\,\mathrm{diag}(\bm{\lambda}_b + \tau)\,\mb{V}_b^\top$ where $\bm{\lambda}_b$ are the eigenvalues of $\mb{L}_b^\top\mb{W}_b\mb{L}_b$ (computed once per Gibbs cycle, independent of $\theta$). Then:
+
+\begin{equation}
+\|\mb{L}_c^{-1}\mb{b}_b(\mb{r}_b)\|^2 = \mb{b}_b^\top\mb{A}_b^{-1}\mb{b}_b = \sum_j \frac{(\mb{V}_b^\top\mb{b}_b(\mb{r}_b))_j^2}{\lambda_{b,j} + \tau}
+\end{equation}
+
+and $\log\det\mb{A}_b = \sum_j \log(\lambda_{b,j} + \tau)$. These depend on $\tau$ analytically.
+
+---
+
+# Proposed PG-Gibbs Algorithm
+
+\begin{algorithm}[H]
+\caption{Pólya-Gamma Gibbs Sampler (PG-Gibbs)}
+\label{alg:pg-gibbs}
+\begin{algorithmic}[1]
+\State \textbf{Input}: block Cholesky factors $\{\mb{L}_b\}$, outcomes $\mb{y}$, prevalence $p_\text{obs}$
+\State \textbf{Initialise}: $\theta^{(0)} = 0$, $\beta_0^{(0)} = \logit(p_\text{obs})$, $\mb{r}^{(0)} \sim \mathrm{Bern}(p_\text{obs})$, $\mb{Z}^{(0)} \sim \N(\mb{0},\mb{I})$
+
+\For{$t = 1, 2, \ldots, T_\text{warmup} + T_\text{samples}$}
+
+  \State \textbf{Step 1: Sample auxiliary variables} $\bm{\omega}$
+  \State Compute $\eta_i = \beta_0 + [\mb{L}_b \mb{Z}_b]_i$ for all $i$
+  \State Draw $\omega_i \sim \mathrm{PG}(1, |\eta_i|)$ independently for all $i$ \hfill [eq.~\eqref{eq:omega-fc}]
+
+  \State \textbf{Step 2: Build eigenvalue cache} (per-block, $O(s_b^3)$ each)
+  \For{each block $b$}
+    \State $\mb{A}_b^{(0)} \leftarrow \mb{L}_b^\top \mathrm{diag}(\bm{\omega}_b) \mb{L}_b$ \quad (eigenvalues $\bm{\lambda}_b$, eigenvectors $\mb{V}_b$)
+    \State Compute $\mb{b}_{\text{like},b} = \mb{L}_b^\top(\bm{\kappa}_b - \bm{\omega}_b\beta_0)$ \hfill [independent of $\theta$ and $\mb{r}_b$]
+  \EndFor
+
+  \State \textbf{Step 3: Sample $\mb{Z}_b$ for each block} \hfill [eq.~\eqref{eq:Z-fc}]
+  \For{each block $b$}
+    \State $\tau \leftarrow e^{-\theta}/2$
+    \State $\mb{A}_b \leftarrow \mb{A}_b^{(0)} + \tau\,\mb{I}$; \; $\mb{L}_c \leftarrow \mathrm{chol}(\mb{A}_b)$
+    \State $\mb{b}_b \leftarrow \mb{b}_{\text{like},b} + \tfrac{1}{2}\mb{r}_b - c_c\,\mb{1}$ \hfill [$c_c = (2p-1)/2$]
+    \State Draw $\mb{u} \sim \N(\mb{0}, \mb{I}_{s_b})$; \; set $\mb{Z}_b \leftarrow \mb{L}_c^{-\top}\mb{u} + \mb{L}_c^{-\top}\mb{L}_c^{-1}\mb{b}_b$
+  \EndFor
+
+  \State \textbf{Step 4: Sample $\mb{r}_b$ for each block} \hfill [eq.~\eqref{eq:r-logweight}]
+  \For{each block $b$}
+    \For{each state $\mb{r}_b \in \{-1,+1\}^{s_b}$} \hfill [$2^{s_b}$ states: 4 for pairs, 8 for triplets]
+      \State $\mb{b}_b(\mb{r}_b) \leftarrow \mb{b}_{\text{like},b} + \tfrac{1}{2}\mb{r}_b - c_c\,\mb{1}$
+      \State $\log w(\mb{r}_b) \leftarrow \tfrac{1}{2}\|\mb{L}_c^{-1}\mb{b}_b(\mb{r}_b)\|^2 - \mu\,C_b(\mb{r}_b) + n_+^{(b)}\log p + n_-^{(b)}\log(1-p)$
+    \EndFor
+    \State Sample $\mb{r}_b^{(t)} \sim \mathrm{Categorical}(\mathrm{softmax}\{\log w(\mb{r}_b)\})$
+  \EndFor
+
+  \State \textbf{Step 5: Sample $\beta_0$} (slice sampler) \hfill [eq.~\eqref{eq:beta0-fc}]
+  \State $n_+ \leftarrow \sum_i \mathbf{1}[r_i^{(t)} = +1]$
+  \State Slice-sample $\beta_0^{(t)}$ from log density \eqref{eq:beta0-fc} initialised at $\beta_0^{(t-1)}$
+  \State Set $p^{(t)} \leftarrow \sigma(\beta_0^{(t)})$, $c_c \leftarrow (2p^{(t)} - 1)/2$
+  \State Re-centre: $\mb{Z}_b \leftarrow \mb{Z}_b + (p^{(t-1)} - p^{(t)})\cdot 2\mu\,\mb{1}$ for all $b$
+
+  \State \textbf{Step 6: Re-sample $\bm{\omega}$} at updated $(\beta_0^{(t)}, \mb{Z}^{(t)})$
+  \State Compute $\eta_i = \beta_0^{(t)} + [\mb{L}_b\mb{Z}_b]_i$ for all $i$
+  \State Draw $\omega_i \sim \mathrm{PG}(1, |\eta_i|)$ \hfill [fresh $\bm{\omega}$ for the $\theta$ update]
+
+  \State \textbf{Step 7: Sample $\theta = \log\mu$} via fully-collapsed log-posterior \hfill [eq.~\eqref{eq:theta-fc}]
+  \State Update cache: $\mb{b}_{\text{like},b} \leftarrow \mb{L}_b^\top(\bm{\kappa}_b - \bm{\omega}_b\beta_0^{(t)})$ using new $\bm{\omega}$
+  \State Slice-sample $\theta^{(t)}$ from $\log p(\theta \mid \bm{\omega}, \mb{y}, \beta_0^{(t)})$ as in eq.~\eqref{eq:theta-fc}:
+  \begin{align*}
+    \log p(\theta) &+ \sum_b \lse_{\mb{r}_b}\!\left[\log P(\mb{r}_b \mid p) + \sum_j \tfrac{(\mb{V}_b^\top \mb{b}_b(\mb{r}_b))_j^2}{2(\lambda_{b,j}+\tau)} - \mu C_b(\mb{r}_b)\right] \\
+    &- \tfrac{1}{2}\sum_b\sum_j \log(\lambda_{b,j}+\tau) - \tfrac{M_\text{rel}}{2}\log(2\mu)
+  \end{align*}
+  \State Set $\mu^{(t)} \leftarrow e^{\theta^{(t)}}$
+
+  \If{$t > T_\text{warmup}$}
+    \State Store $\theta^{(t)}$, $\beta_0^{(t)}$
+  \EndIf
+
+\EndFor
+\end{algorithmic}
+\end{algorithm}
+
+---
+
+# Key Differences from the Current Implementation
+
+## What was wrong in the previous implementation
+
+The previous `correct_model` code path used a **direct r update**: sample $r_i$ from $p(r_i \mid Z_{\text{mix},i}, \beta_0, p)$ with $\log\text{-odds} = \beta_0 + Z_{\text{mix},i}$. This update is valid but creates **Z–r autocorrelation**: $Z_{\text{mix},i}$ is sampled from the posterior given the *current* $r_i$, so it is biased toward $r_i\mu$, making $r_i$ sticky.
+
+Consequences:
+- $n_+$ is inflated toward $\sum_i \mathbf{1}[y_i=1]$ rather than the correct marginal $M_\text{rel} \cdot p$
+- This inflates $\beta_0$ and $p$, which biases the centering correction and the $\theta$ log-posterior
+- The chain settles in a self-reinforcing local mode at $(\mu \approx 0.68, p \approx 0.70)$ instead of the correct posterior $(\mu \approx 0.97, p \approx 0.63)$
+
+Additionally, the $\theta$ log-posterior was evaluated *conditioning on the sampled $\mb{r}$*, creating a $\mu$–$\mb{r}$ positive-feedback loop. The collapsed $\mb{r}$ update (attempted earlier) exacerbated this.
+
+## What the new algorithm does differently
+
+| Step | Previous (direct-$r$) | New (PG-Gibbs from first principles) |
+|------|-----------------------|--------------------------------------|
+| $\mb{r}$ update | Direct: $p(r_i \mid Z_{\text{mix},i})$ | **Collapsed**: enumerate all $2^{s_b}$ states per block, including $-\mu C_b(\mb{r}_b)$ |
+| $\mb{Z}$ update | Per-block Gaussian (correct) | Per-block Gaussian (same) |
+| $\beta_0$ update | Slice on $n_+$ from biased $\mb{r}$ | Slice on $n_+$ from correctly-collapsed $\mb{r}$ |
+| $\theta$ update | Cache uses sampled $\mb{r}$; $C_\text{norm}$ from binary $n_+$ | **Fully collapsed**: logsumexp over all $\mb{r}_b$ states; no $\mu$–$\mb{r}$ feedback |
+
+## Relationship to DiscreteHMCGibbs
+
+Both algorithms use the same probability model. The differences are:
+
+- DiscreteHMCGibbs updates $(\mu, p, \mb{Z}_\text{mix})$ *jointly* via NUTS (exploiting gradient correlations), while PG-Gibbs updates each parameter in sequence.
+- PG-Gibbs conditions the $\mb{Z}$ update on $\bm{\omega}$ (Gaussian), while NUTS uses the exact logistic likelihood.
+- PG-Gibbs Step 7 (fully collapsed $\theta$) marginalises $\mb{r}$ exactly, matching what NUTS does implicitly when updating $\mu$.
+
+The PG-Gibbs algorithm is equivalent in model specification and should, in the large-sample limit, give the same marginal posterior for $\mu$.
+
+---
+
+# Computational Complexity
+
+Per Gibbs iteration, for $B$ blocks of maximum size $s_\text{max}$:
+
+| Step | Cost |
+|------|------|
+| Sample $\bm{\omega}$ | $O(M_\text{rel})$ PG draws |
+| Eigenvalue cache (Step 2) | $O(B s_\text{max}^3)$ |
+| Sample $\mb{Z}$ (Step 3) | $O(B s_\text{max}^3)$ Cholesky |
+| Sample $\mb{r}$ (Step 4) | $O(B \cdot 2^{s_\text{max}} \cdot s_\text{max}^2)$ |
+| Sample $\beta_0$ (Step 5) | $O(M_\text{rel})$ per slice step |
+| Sample $\theta$ (Step 7) | $O(B \cdot 2^{s_\text{max}} \cdot s_\text{max})$ per slice step |
+
+For $s_\text{max} = 3$ (pairs and triplets): $2^3 = 8$ states, all steps are $O(M_\text{rel})$. The fully collapsed $\theta$ update is *not* more expensive than the current eigenvalue-cache approach.
+
+---
+
+# References
+
+- McKeigue PM (2019). Quantifying performance of a diagnostic test as the expected information for discrimination: relation to the C-statistic. *Statistical Methods in Medical Research*, 28(6), 1841--1851.
+- Polson NG, Scott JG, Windle J (2013). Bayesian inference for logistic models using Pólya-gamma latent variables. *JASA*, 108(504), 1339--1349.
+- Nishihara R, Murray I, Adams RP (2014). Parallel MCMC with generalized elliptical slice sampling. *JMLR*, 15(1), 2087--2112.
+- Hoffman MD, Gelman A (2014). The No-U-Turn Sampler: adaptively setting path lengths in Hamiltonian Monte Carlo. *JMLR*, 15(1), 1593--1623.

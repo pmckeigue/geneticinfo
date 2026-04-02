@@ -15,9 +15,9 @@ All models share the structure: observed binary outcome y is Bernoulli with logi
 
 ---
 
-## `geninfo` module — Python API for PG-Gibbs inference
+## `geneticinfo` module — Python API for PG-Gibbs inference
 
-`geninfo.py` exposes the PG-Gibbs sampler as a clean Python module with three public functions.
+`geneticinfo.py` exposes the PG-Gibbs sampler as a clean Python module with three public functions.
 
 ### `build_blocks`
 
@@ -108,8 +108,8 @@ Returns a dict with keys `mean`, `median`, `sd`, `ci90_lo`, `ci90_hi`, `ess_bulk
 
 ```python
 import numpy as np
-from geninfo import build_blocks, sample_posterior, summarize_and_plot
-from geneticinfo import simulate_casecontrol_related
+from geneticinfo import build_blocks, sample_posterior, summarize_and_plot
+from geneticinfo_functions import simulate_casecontrol_related
 
 y, A, L, info, g = simulate_casecontrol_related(
     n_fullsib_pairs=400_000, n_fullsib_trips=200_000,
@@ -134,7 +134,7 @@ print(stats)
 
 | File | Role |
 |---|---|
-| `geninfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
+| `geneticinfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
 | `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs`, `_worker_preloaded_lrpg` |
 | `pg_gibbs_vectorized.py` | `GroupedBlocks` (block-by-size storage and mat-vec) |
 | `polyagamma_gibbs.py` | `infer_blocks_from_L`, `BlockStructure`, `ChainConfig` |
@@ -361,8 +361,8 @@ Both 90% credible intervals contain the true value μ = 2.0.  The posterior medi
 
 | File | Description |
 |---|---|
-| `geninfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
-| `geneticinfo.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
+| `geneticinfo.py` | Public module: `sample_posterior`, `summarize_and_plot` |
+| `geneticinfo_functions.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
 | `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs` sampler: exact match to `lr_discrete_blockdiag` model; `PGGibbsBlockSampler` reference implementation |
 | `pg_gibbs_vectorized.py` | Earlier vectorised PG-Gibbs sampler: grouped block operations, collapsed θ update |
 | `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |

@@ -13,7 +13,7 @@ import numpy as np
 num_chains = min(4, jax.device_count())
 numpyro.set_host_device_count(num_chains)
 
-from geneticinfo import (
+from geneticinfo_functions import (
     simulate_casecontrol_related, print_casecontrol_summary,
     lr_discrete_blockdiag, reduce_to_relatives,
 )

@@ -15,7 +15,7 @@ from scipy.stats import gaussian_kde
 import arviz as az
 from tqdm import tqdm
 
-from geneticinfo import simulate_casecontrol_related, print_casecontrol_summary
+from geneticinfo_functions import simulate_casecontrol_related, print_casecontrol_summary
 from polyagamma_gibbs import (
     ChainConfig, infer_blocks_from_L, BlockStructure,
 )

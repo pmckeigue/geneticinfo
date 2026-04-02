@@ -1,0 +1,60 @@
+# JAGS model: logistic_mix2_conditioned
+#
+# Equivalent to logistic_mix2_conditioned in geneticinfo.py.
+#
+# The mixture class indicator is FIXED to the observed case-control status:
+#   y[i] = 1 (case)    -> W[i] ~ N(+mu, s^2)
+#   y[i] = 0 (control) -> W[i] ~ N(-mu, s^2)
+#
+# This eliminates label switching (the 2^M discrete multimodality that makes
+# the unconditioned mixture unidentifiable across chains) and leaves only the
+# continuous parameters W[1:M], s, beta0 to sample.
+#
+# G = L %*% W  (L is the Cholesky factor, passed as fixed data)
+# logit(p[i]) = beta0 + inprod(L[i,], W[])
+#
+# The JAGS GLM module should sample W[1:M] and beta0 jointly via the IWLS
+# (Holmes-Held-style) proposal because L is a fixed design matrix and W has
+# a conditionally normal prior (mean depends on observed y, which is data).
+#
+# Data:
+#   M          : number of individuals (relatives-only subsample)
+#   L[M,M]     : Cholesky factor of genetic relationship matrix
+#   y[M]       : binary case/control status (0/1) — observed data
+#   sign_y[M]  : 2*y - 1  (+1 for cases, -1 for controls) — precomputed from y
+#                Passed as separate data to avoid a directed cycle in the graph
+#                (JAGS forbids y[i] appearing in both W[i]'s prior and its own
+#                likelihood node).
+#   p_obs      : case proportion in the full case-control sample (~0.5)
+#   logit_pobs : logit(p_obs)
+#   tau_beta0  : prior precision for beta0 = 1/25
+#   tau_s      : prior precision for s    = 1/25
+#
+# Monitored: mu, s, beta0
+
+model {
+
+  # ---- Priors ----
+  beta0  ~ dnorm(logit_pobs, tau_beta0)   # N(logit(p_obs), 5^2)
+  s      ~ dnorm(0.0, tau_s) T(0.0, )    # HalfNormal(5)
+  mu     <- 0.5 * pow(s, 2)
+  prec_s <- pow(s, -2)
+
+  # ---- Latent genotypic values conditioned on observed class ----
+  # sign_y[i] = 2*y[i] - 1 is passed as fixed data (no graphical cycle).
+  # W[i] ~ N(sign_y[i]*mu, s^2):
+  #   cases    (sign_y=+1): W[i] ~ N(+mu, s^2)
+  #   controls (sign_y=-1): W[i] ~ N(-mu, s^2)
+  for (i in 1:M) {
+    W[i] ~ dnorm(sign_y[i] * mu, prec_s)
+  }
+
+  # ---- Logistic likelihood ----
+  # G[i] = (L %*% W)[i] exposed via inprod with fixed design matrix L.
+  # JAGS GLM module should update W[1:M] and beta0 jointly.
+  for (i in 1:M) {
+    logit(p[i]) <- beta0 + inprod(L[i, 1:M], W[1:M])
+    y[i] ~ dbern(p[i])
+  }
+
+}

@@ -1,0 +1,157 @@
+\documentclass[12pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{bm}
+\usepackage{parskip}
+
+\title{Likelihood for ascertained proband--relative--unrelated strata}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Sampling design}
+
+Families containing at least one case are ascertained.  From each ascertained
+family we observe three individuals:
+\begin{itemize}
+  \item Proband $P$: the index case, so $y_P = 1$ by design.
+  \item Relative $R$: one family member of $P$, observed with their natural
+        disease status $y_R \in \{0,1\}$.
+  \item Unrelated $U$: one individual sampled at random from the population,
+        observed with their natural disease status $y_U \in \{0,1\}$.
+\end{itemize}
+Let $G_P$, $G_R$, $G_U$ denote the unobserved genotypic values of these three
+individuals.
+
+\section*{Logistic model}
+
+Under the logistic model, outcomes are conditionally independent given genotypic
+values:
+\[
+  P(y_i = 1 \mid G_i) = \sigma(\beta_0 + G_i)
+  \;=\; \frac{e^{\,\beta_0 + G_i}}{1 + e^{\,\beta_0 + G_i}},
+\]
+where $\beta_0$ is the population log-odds of disease.  The genotypic values
+satisfy
+\[
+  G_i \;=\; s\,(L\bm{z})_i, \qquad \bm{z} \sim \mathcal{N}(\bm{0},\bm{I}),
+\]
+with $L$ the Cholesky factor of the genetic relationship matrix and
+$\mu = \tfrac{1}{2}s^2$ the genetic information parameter.
+
+\section*{Joint likelihood conditional on genotypic values}
+
+Given $G_P, G_R, G_U$, the three outcomes are independent:
+\begin{equation}
+  P(y_P, y_R, y_U \mid G_P, G_R, G_U)
+  \;=\;
+  \sigma(\beta_0 + G_P)^{y_P}[1-\sigma(\beta_0+G_P)]^{1-y_P}
+  \cdot
+  P(y_R \mid G_R)
+  \cdot
+  P(y_U \mid G_U),
+\end{equation}
+with the proband factor evaluated at $y_P = 1$.
+
+\section*{Ascertainment correction}
+
+Because families are selected on having a case, the ascertainment probability
+for a family containing at least one member with genotypic value $G_P$ is
+\[
+  P(\text{ascertained} \mid G_P) \;=\; P(y_P = 1 \mid G_P)
+  \;=\; \sigma(\beta_0 + G_P).
+\]
+The ascertainment-corrected likelihood divides the joint probability by this
+selection probability:
+\begin{align}
+  L(\beta_0, s \mid y_R, y_U,\, G_P, G_R, G_U)
+  &\;\propto\;
+  \frac{P(y_P=1, y_R, y_U \mid G_P, G_R, G_U)}
+       {P(\text{ascertained} \mid G_P)}
+  \notag\\[6pt]
+  &\;=\;
+  \frac{\sigma(\beta_0+G_P)\cdot P(y_R \mid G_R)\cdot P(y_U \mid G_U)}
+       {\sigma(\beta_0+G_P)}.
+\end{align}
+
+The proband factor $\sigma(\beta_0+G_P)$ cancels, giving
+\begin{equation}
+  \boxed{
+    L(\beta_0, s \mid y_R, y_U,\, G_P, G_R, G_U)
+    \;=\;
+    P(y_R \mid G_R)\cdot P(y_U \mid G_U).
+  }
+\end{equation}
+
+The proband's genotypic value $G_P$ does \emph{not} appear in the likelihood.
+It enters inference only through the prior on the genotypic values: because $P$
+and $R$ are relatives, $(G_P, G_R)$ are jointly Gaussian with covariance
+$s^2 \cdot r_{PR}$, where $r_{PR}$ is the kinship coefficient (e.g.\
+$r_{PR}=0.5$ for full siblings).  Conditioning on $y_P = 1$ in the joint
+prior updates the distribution of $G_P$ upward, which in turn shifts the prior
+on $G_R$ upward:
+\[
+  G_R \mid G_P \;\sim\; \mathcal{N}\!\left(r_{PR}\,G_P,\;
+  s^2(1 - r_{PR}^2)\right).
+\]
+
+\section*{Why the proband's case status informs the relative's risk}
+
+Marginalising over $G_P$ and $G_R$ (i.e.\ integrating over the genotypic
+prior):
+\[
+  P(y_R = 1 \mid y_P = 1)
+  \;=\;
+  \int P(y_R=1 \mid G_R)\;
+  p(G_R \mid G_P)\;
+  p(G_P \mid y_P=1)\;
+  dG_P\, dG_R
+  \;>\; K,
+\]
+where $K = P(y_R=1)$ is the population prevalence.  Observing $y_P=1$
+shifts the posterior on $G_P$ toward higher values (ascertainment), which
+shifts the prior on $G_R$ upward, which elevates $P(y_R=1 \mid y_P=1)$.
+The ratio
+\[
+  \lambda_S \;=\; \frac{P(y_R=1 \mid y_P=1)}{K}
+  \;\approx\; e^{\mu} \quad \text{for small } K \text{ and } \mu,
+\]
+is the sibling recurrence risk ratio.  The proband's case status is thus
+informative about the relative's risk only through this shared-genetics
+channel, not through the ascertainment-corrected likelihood.
+
+\section*{Expanded form of the likelihood}
+
+Writing out the two logistic factors:
+\begin{align}
+  L
+  &\;=\;
+  \sigma(\beta_0 + G_R)^{y_R}
+  \left[1 - \sigma(\beta_0 + G_R)\right]^{1-y_R}
+  \cdot
+  \sigma(\beta_0 + G_U)^{y_U}
+  \left[1 - \sigma(\beta_0 + G_U)\right]^{1-y_U}.
+\end{align}
+
+Both $\beta_0$ and $s$ (through its effect on $G_R$ and $G_U$) are
+estimable:
+\begin{itemize}
+  \item \textbf{Intercept $\beta_0$}: identified by the overall case rate among
+        $R$ and $U$.
+  \item \textbf{Scale $s$ (genetic signal)}: identified by the excess case rate
+        in $R$ relative to $U$, given that the proband was a case.
+\end{itemize}
+
+\section*{Comparison with the conditional logistic likelihood}
+
+If instead we ignored the sampling design and treated $(P, R, U)$ as a
+matched set of three, the conditional logistic likelihood would condition on
+$\sum_i y_i = 1 + y_R + y_U$ and give equal weight to all permutations of
+case assignment within the stratum (see \textit{cond\_likelihood.pdf}).  This
+is incorrect here because the proband's case status is \emph{fixed by design},
+not interchangeable with the other stratum members.  The ascertainment-corrected
+likelihood derived above accounts for the asymmetric roles of $P$, $R$, and $U$.
+
+\end{document}

@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from geneticinfo import (
+from geneticinfo_functions import (
     simulate_casecontrol_related,
     print_casecontrol_summary,
     fit_svi_lowrank,

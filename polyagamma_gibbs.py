@@ -33,7 +33,7 @@ from typing import List, Tuple, Dict, Optional
 import numpy as np
 #from tqdm.auto import tqdm
 from tqdm import tqdm
-from geneticinfo import (
+from geneticinfo_functions import (
     simulate_casecontrol_related, print_casecontrol_summary,
     lr_discrete_blockdiag, reduce_to_relatives, create_data
 )

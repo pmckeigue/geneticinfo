@@ -1,0 +1,72 @@
+# JAGS model: logistic_mix2_mvnorm
+#
+# Equivalent to the NumPyro logistic_mix2_mvnorm model.
+#
+# Key parameterisation for Holmes-Held / IWLS conjugate sampling:
+#
+#   G = L %*% W       (L is the Cholesky factor of the GRM, passed as data)
+#   W[i] ~ N(mu_z[i], s^2)   where mu_z[i] = (2*z[i]-1)*mu, mu = 0.5*s^2
+#   logit(p[i]) = beta0 + G[i] = beta0 + inprod(L[i,], W[])
+#
+# Writing the likelihood this way exposes L as a FIXED design matrix and W as
+# regression coefficients with a (conditionally) normal prior.  JAGS's GLM
+# module (glm.so) should then sample W[1:M] and beta0 JOINTLY via the IWLS
+# Metropolis proposal, one block update per Gibbs sweep.
+#
+# The discrete class indicators z[i] are updated one at a time by standard
+# Gibbs, which is exact for binary nodes.
+#
+# Data required (pass from Python via pyjags):
+#   M          : number of individuals (relatives-only subsample)
+#   L[M,M]     : Cholesky factor of genetic relationship matrix A_red
+#   y[M]       : binary case/control status (0/1)
+#   p_obs      : observed case proportion in the FULL case-control sample
+#   logit_pobs : logit(p_obs)
+#   tau_beta0  : prior precision for beta0  = 1/25  (sd = 5)
+#   tau_s      : prior precision for s      = 1/25  (sd = 5, truncated at 0)
+#   zero_M[M]  : vector of zeros (used as zero mean for dmnorm alternative)
+#
+# Monitored parameters: mu, s, beta0
+
+model {
+
+  # ---------------------------------------------------------------
+  # Global hyperpriors
+  # ---------------------------------------------------------------
+  beta0 ~ dnorm(logit_pobs, tau_beta0)   # N(logit(p_obs), 5^2)
+  s     ~ dnorm(0.0, tau_s) T(0.0, )    # HalfNormal(5): s > 0
+  mu    <- 0.5 * pow(s, 2)              # genetic information (nats)
+  prec_s <- pow(s, -2)                  # precision = 1/s^2
+
+  # ---------------------------------------------------------------
+  # Discrete mixture class indicators — exact Gibbs
+  # z[i] = 0 -> control-like component (mean -mu)
+  # z[i] = 1 -> case-like  component  (mean +mu)
+  # ---------------------------------------------------------------
+  for (i in 1:M) {
+    z[i]    ~ dbern(p_obs)
+    mu_z[i] <- (2.0 * z[i] - 1.0) * mu
+  }
+
+  # ---------------------------------------------------------------
+  # Latent genotypic values W[i] — independent normals with class mean
+  # The design matrix is L (fixed data); writing the likelihood as
+  #   logit(p[i]) = beta0 + inprod(L[i,], W[])
+  # signals to the JAGS GLM module that W[1:M] are regression
+  # coefficients and should be sampled jointly via IWLS / Holmes-Held.
+  # ---------------------------------------------------------------
+  for (i in 1:M) {
+    W[i] ~ dnorm(mu_z[i], prec_s)
+  }
+
+  # ---------------------------------------------------------------
+  # Logistic likelihood
+  # G[i] = (L %*% W)[i] — computed via inner product with each row of L
+  # logit link activates the JAGS GLM sampler for W and beta0
+  # ---------------------------------------------------------------
+  for (i in 1:M) {
+    logit(p[i]) <- beta0 + inprod(L[i, 1:M], W[1:M])
+    y[i] ~ dbern(p[i])
+  }
+
+}

@@ -630,7 +630,7 @@ def run_one_chain_fast(
     K: float,
     cfg: ChainConfig,
 ) -> dict:
-    from geneticinfo import create_data
+    from geneticinfo_functions import create_data
     M_full, L, y, _, logs = create_data(dataseed, K, float(np.exp(target)))
 
     L = np.asarray(L, dtype=np.float64)

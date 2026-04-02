@@ -1,0 +1,167 @@
+\documentclass[12pt]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{bm}
+\usepackage{parskip}
+
+\title{Conditional likelihood for ascertained sibships}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section*{Setup}
+
+A sibship of size $n$ is sampled because it contains at least one affected
+member.  We observe all $n$ outcomes $y_1,\ldots,y_n \in \{0,1\}$, with
+$m = \sum_i y_i \geq 1$ cases.  The genotypic values $G_1,\ldots,G_n$ are
+unobserved.  Under the logistic model, outcomes are conditionally independent
+given genotypic values:
+\[
+  P(y_i = 1 \mid G_i) \;=\; \sigma(\beta_0 + G_i) \;=\;
+  \frac{e^{\beta_0+G_i}}{1+e^{\beta_0+G_i}}, \qquad
+  1 - \sigma(\beta_0+G_i) \;=\; \frac{1}{1+e^{\beta_0+G_i}}.
+\]
+
+\section*{Ascertainment-corrected likelihood}
+
+The sibship is observed only if at least one member is affected.  The
+probability of ascertainment given the genotypic values is
+\[
+  P(\text{at least one case} \mid \bm{G})
+  \;=\;
+  1 - \prod_{i=1}^n [1 - \sigma(\beta_0+G_i)]
+  \;=\;
+  1 - \prod_{i=1}^n \frac{1}{1+e^{\beta_0+G_i}}.
+\]
+The ascertainment-corrected likelihood is the joint outcome probability divided
+by this selection probability:
+\begin{equation}
+  L(\beta_0, s \mid \bm{y}, \bm{G})
+  \;=\;
+  \frac{P(\bm{y} \mid \bm{G})}{P(\text{at least one case} \mid \bm{G})}
+  \;=\;
+  \frac{
+    \displaystyle\prod_{i:\,y_i=1} \sigma(\beta_0+G_i)
+    \;\cdot\;
+    \displaystyle\prod_{i:\,y_i=0} [1-\sigma(\beta_0+G_i)]
+  }{
+    1 - \displaystyle\prod_{i=1}^n [1-\sigma(\beta_0+G_i)]
+  }.
+\end{equation}
+
+Multiplying numerator and denominator by $\prod_i(1+e^{\beta_0+G_i})$ and
+writing $e^{\beta_0+G_i}$ for the odds, the factors $(1+e^{\beta_0+G_i})^{-1}$
+cancel pairwise between numerator and denominator to give:
+
+\begin{equation}
+  \boxed{
+    L(\beta_0, s \mid \bm{y}, \bm{G})
+    \;=\;
+    \frac{
+      \displaystyle\prod_{i:\,y_i=1} e^{\,\beta_0 + G_i}
+    }{
+      \displaystyle\prod_{i=1}^n \bigl(1 + e^{\,\beta_0 + G_i}\bigr) \;-\; 1
+    }.
+  }
+\end{equation}
+
+\section*{Denominator as a sum over non-empty subsets}
+
+Expanding the product in the denominator,
+\[
+  \prod_{i=1}^n (1+e^{\beta_0+G_i})
+  \;=\;
+  1 + \sum_{\mathcal{S} \neq \emptyset}
+      \prod_{i \in \mathcal{S}} e^{\,\beta_0+G_i}
+  \;=\;
+  1 + \sum_{k=1}^n e^{\,k\beta_0}
+    \sum_{\mathcal{S}:\,|\mathcal{S}|=k}
+    e^{\,\sum_{i\in\mathcal{S}} G_i},
+\]
+so the denominator is
+\[
+  \sum_{k=1}^n e^{\,k\beta_0}
+  \sum_{\mathcal{S}:\,|\mathcal{S}|=k} e^{\,\sum_{i\in\mathcal{S}} G_i}.
+\]
+This is a weighted sum over all $2^n - 1$ non-empty subsets $\mathcal{S}$,
+each contributing $e^{|\mathcal{S}|\beta_0 + \sum_{i\in\mathcal{S}} G_i}$.
+Because different subset sizes $k$ enter with weights $e^{k\beta_0}$ that
+depend on $\beta_0$, \textbf{the intercept does not cancel}: the likelihood
+retains information about the prevalence $K = \sigma(\beta_0)$.
+
+\section*{Special cases}
+
+\subsection*{Discordant pair ($n=2$, $m=1$)}
+
+Without loss of generality let $y_1=1$, $y_2=0$:
+\[
+  L \;=\;
+  \frac{e^{\beta_0+G_1}}{(1+e^{\beta_0+G_1})(1+e^{\beta_0+G_2}) - 1}
+  \;=\;
+  \frac{e^{\beta_0+G_1}}{e^{\beta_0+G_1} + e^{\beta_0+G_2} + e^{2\beta_0+G_1+G_2}}.
+\]
+For rare disease ($K \ll 1$, $\beta_0 \to -\infty$) the term
+$e^{2\beta_0+G_1+G_2}$ is negligible, and
+\[
+  L \;\approx\;
+  \frac{e^{G_1}}{e^{G_1}+e^{G_2}} \;=\; \sigma(G_1 - G_2),
+\]
+which is identical to the conditional logistic likelihood for a discordant pair.
+
+\subsection*{Concordant-affected pair ($n=2$, $m=2$)}
+
+\[
+  L \;=\;
+  \frac{e^{2\beta_0+G_1+G_2}}{e^{\beta_0+G_1} + e^{\beta_0+G_2} + e^{2\beta_0+G_1+G_2}}.
+\]
+For rare disease this is approximately $e^{\beta_0}(e^{G_1}+e^{G_2})^{-1}$, so
+the likelihood shrinks as $K \to 0$: a concordant-affected pair is increasingly
+surprising for a rare disease, and this information is retained.  The
+conditional logistic likelihood for a concordant pair is 1 (trivially), so
+\textbf{concordant-affected sibships carry information here but not in the
+conditional logistic likelihood}.
+
+\section*{Comparison with the conditional logistic likelihood}
+
+The conditional logistic likelihood conditions on the observed stratum total
+$m = \sum_i y_i$:
+\[
+  P(\bm{y} \mid m,\, \bm{G})
+  \;=\;
+  \frac{e^{\,\sum_{i:\,y_i=1} G_i}}
+       {\displaystyle\sum_{\mathcal{S}:\,|\mathcal{S}|=m}
+        e^{\,\sum_{i\in\mathcal{S}} G_i}}.
+\]
+Compared with the ascertainment-corrected likelihood:
+\begin{itemize}
+  \item The denominator sums over \emph{all $2^n-1$ non-empty subsets}
+        rather than only the $\binom{n}{m}$ subsets of the observed size $m$.
+  \item $\beta_0$ does not cancel, because the weights $e^{k\beta_0}$ differ
+        across subset sizes.
+  \item Concordant-affected sibships ($m=n$) contribute to the likelihood,
+        whereas their contribution to the conditional logistic likelihood is
+        trivially~1 (a single term in numerator and denominator).
+  \item For rare disease and discordant strata, the two likelihoods agree to
+        first order in $K$.
+\end{itemize}
+The conditional logistic likelihood can be recovered by factoring the
+ascertainment-corrected likelihood as
+\[
+  L(\beta_0, s \mid \bm{y}, \bm{G})
+  \;=\;
+  P(\bm{y} \mid m, \bm{G})
+  \;\times\;
+  \frac{\displaystyle\sum_{\mathcal{S}:\,|\mathcal{S}|=m}
+        e^{\,\beta_0 m + \sum_{i\in\mathcal{S}} G_i}}
+       {\displaystyle\sum_{k=1}^n e^{k\beta_0}
+        \sum_{\mathcal{S}:\,|\mathcal{S}|=k}
+        e^{\,\sum_{i\in\mathcal{S}} G_i}},
+\]
+where the second factor is the probability that the observed $m$ is the
+stratum total, given that the stratum has at least one case.  The conditional
+logistic likelihood discards this second factor and its information about
+$\beta_0$.
+
+\end{document}
