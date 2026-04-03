@@ -91,3 +91,15 @@ np.savez_compressed(
     n_chains       = np.int32(len(result["chain_dicts"])),
 )
 print(f"Results saved to results_{PHENO}.npz")
+
+# Remove all files except the two outputs so dxjupyterlab does not upload
+# the cloned repo, input data, and setup files to the project file store.
+import shutil
+_keep = {f"results_{PHENO}.npz", f"posterior_{PHENO}.png"}
+for _name in os.listdir("."):
+    if _name not in _keep:
+        if os.path.isdir(_name):
+            shutil.rmtree(_name)
+        else:
+            os.remove(_name)
+print("Cleanup done; uploading:", sorted(_keep))
