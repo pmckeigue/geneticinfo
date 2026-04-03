@@ -134,7 +134,15 @@ download_results() {
     echo "Downloading ${#RESULT_FILES[@]} result file(s) to ${LOCAL_OUTPUT_DIR}/..."
     mkdir -p "${LOCAL_OUTPUT_DIR}"
     for f in "${RESULT_FILES[@]}"; do
-        dx download "${REMOTE_OUTPUT_DIR}/${f}" -o "${LOCAL_OUTPUT_DIR}" -f
+        # When duplicate remote files exist (from earlier runs), pick the most
+        # recently created one by file ID (dx find data returns oldest first).
+        local file_id
+        file_id=$(dx find data --brief --name "${f}" --path "${REMOTE_OUTPUT_DIR}" 2>/dev/null | tail -1)
+        if [[ -z "${file_id}" ]]; then
+            echo "ERROR: remote file not found: ${REMOTE_OUTPUT_DIR}/${f}" >&2
+            return 1
+        fi
+        dx download "${file_id}" -o "${LOCAL_OUTPUT_DIR}/${f}" -f
         echo "  Downloaded: ${f}"
     done
 }
