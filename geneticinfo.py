@@ -561,7 +561,8 @@ def sample_posterior(
 
         bars = [
             tqdm(total=n_warmup + n_samples, position=cid,
-                 desc=f"chain {cid}  warmup", leave=True, dynamic_ncols=True)
+                 desc=f"chain {cid}  warmup", leave=True, dynamic_ncols=True,
+                 mininterval=30)
             for cid in range(n_chains)
         ]
 

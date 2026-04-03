@@ -24,7 +24,7 @@ upload_files() {
     echo "Uploading scripts to DNAnexus..."
     python3 -c "
 import sys
-sys.path.insert(0, 'setupscripts')
+sys.path.insert(0, '.')
 from ukbb_utils import dx_upload
 dx_upload('${SCRIPT_LOCAL}', '/${REMOTE_FOLDER}/')
 "
@@ -53,14 +53,14 @@ run_job() {
     echo "  PHENO: ${PHENO}"
     echo "  Remote output: ${REMOTE_PHENO_DIR}/"
     
-    JOB_OUTPUT=$(dx run swiss-army-knife \
+    JOB_OUTPUT=$(dx run dxjupyterlab --priority high --name geneticinfo_${PHENO} \
         -iin="${REMOTE_FOLDER}/${SCRIPT_NAME}" \
         -isnapshot=".Notebook_snapshots/snapshot-jupyterlab-pheno.tar.gz" \
         -icmd="python3 ${SCRIPT_NAME} ${PHENO}"  \
         --yes --brief --destination="${REMOTE_PHENO_DIR}/" \
         --instance-type=${INSTANCE_TYPE} \
         --priority=${priority} \
-        --name="phenotypes_proteins ${PHENO} (attempt $attempt)")
+        --name="genetic info ${PHENO} (attempt $attempt)")
     
     JOB_ID=$(echo "$JOB_OUTPUT" | grep -oP 'job-[A-Za-z0-9]+' | head -1)
     

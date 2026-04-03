@@ -46,8 +46,8 @@ blocks = build_blocks(L, y, corr_threshold=0.03)
 result = sample_posterior(
     L, y,
     blocks=blocks,
-    n_warmup=2000,
-    n_samples=10000,
+    n_warmup=500,
+    n_samples=2000,
     n_chains=8,
     n_blas_threads=1,
 )
@@ -86,8 +86,8 @@ np.savez_compressed(
     # Sampler settings
     mu_prior_scale = np.float64(result["mu_prior_scale"]),
     mu_prior_df    = np.float64(result["mu_prior_df"]),
-    n_warmup       = np.int32(result["n_warmup"]),
-    n_samples      = np.int32(result["n_samples"]),
+    n_warmup       = np.int32(result["cfg"].n_warmup),
+    n_samples      = np.int32(result["cfg"].n_samples),
     n_chains       = np.int32(len(result["chain_dicts"])),
 )
 print(f"Results saved to results_{PHENO}.npz")
