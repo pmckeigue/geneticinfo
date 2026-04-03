@@ -360,9 +360,11 @@ def _worker_with_queue(args):
     n_s = lr_cfg.n_samples
     UPDATE_EVERY = 50
 
+    mu_warmup = np.empty(n_w, dtype=np.float64)
     last = 0
     for i in range(n_w):
         sampler.step()
+        mu_warmup[i] = sampler.mu
         if (i + 1) % UPDATE_EVERY == 0 or i == n_w - 1:
             delta = (i + 1) - last
             last = i + 1
@@ -389,6 +391,7 @@ def _worker_with_queue(args):
 
     q.put(("done", chain_id))
 
+    n_steps = max(sampler._step_count, 1)
     return {
         "chain_id": int(chain_id),
         "true_mu": float(true_mu),
@@ -396,6 +399,9 @@ def _worker_with_queue(args):
         "beta0": beta0,
         "p": p,
         "ll": ll,
+        "mu_warmup":         mu_warmup,
+        "mean_theta_shrink": sampler._theta_shrink_total / n_steps,
+        "mean_theta_step":   sampler._theta_step_total   / n_steps,
     }
 
 
