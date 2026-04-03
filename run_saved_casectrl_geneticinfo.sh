@@ -6,7 +6,7 @@ set -euo pipefail
 
 export PHENO="RA"
 
-for SLICE_W in 1.0 1.5; do
+for SLICE_W in 0.5 1.0; do
     export SLICE_W
     bash run_dnanexus_job.sh casectrl_geneticinfo.cfg
 done

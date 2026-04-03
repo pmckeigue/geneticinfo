@@ -31,6 +31,7 @@ subprocess.run(["bash", "run.sh"], check=True)
 
 sys.path.insert(0, "/opt/notebooks/geneticinfo")
 
+import time
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")
@@ -52,16 +53,20 @@ print(f"Block structure: M={bi['M']}  n_blocks={bi['n_blocks']}  "
       f"n_relatives={sum(s*c for s,c in bi['sizes_summary'].items() if s>=2)}")
 print("  " + "  ".join(f"size-{s}:{c}" for s, c in sorted(bi["sizes_summary"].items())))
 
+t0 = time.time()
 result = sample_posterior(
     L, y,
     blocks=blocks,
-    n_warmup=500,
+    n_warmup=1000,
     n_samples=2000,
     n_chains=8,
     n_blas_threads=1,
     mu_prior_df=30.0,
     slice_w=slice_w,
 )
+wall_time = time.time() - t0
+n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples
+print(f"Wall time: {wall_time:.1f}s  ({wall_time / n_iter_per_chain:.4f}s/iter per chain)")
 
 outfile = f"posterior_{PHENO}_sw{slice_w}.png"
 summary = summarize_and_plot(result, outfile=outfile)
@@ -112,6 +117,8 @@ np.savez_compressed(
     n_relatives    = np.int32(sum(s*c for s,c in block_info["sizes_summary"].items() if s>=2)),
     block_sizes    = sizes,
     block_counts   = counts,
+    # Timing
+    wall_time_s    = np.float64(wall_time),
     # Sampler settings
     mu_prior_scale = np.float64(result["mu_prior_scale"]),
     mu_prior_df    = np.float64(result["mu_prior_df"]),
