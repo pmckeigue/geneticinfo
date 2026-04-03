@@ -360,11 +360,33 @@ def _worker_with_queue(args):
     n_s = lr_cfg.n_samples
     UPDATE_EVERY = 50
 
+    jags_adapt = args[7] if len(args) > 7 else False
+
+    # JAGS-style adaptation of slice widths during warmup (Neal 2003 / JAGS Slicer.cc).
+    # Tracks linearly-weighted running average of |Δtheta| and |Δphi|;
+    # targets w = 2 * weighted_mean(|displacement|).  Adaptation freezes
+    # at end of warmup; sampling phase uses the final adapted widths.
+    _JAGS_MIN_ADAPT = 50
+    sumdiff_theta = 0.0
+    sumdiff_phi   = 0.0
+    n_adapt       = 0
+
     mu_warmup = np.empty(n_w, dtype=np.float64)
     last = 0
     for i in range(n_w):
+        theta_old = sampler.theta
+        phi_old   = sampler.phi
         sampler.step()
         mu_warmup[i] = sampler.mu
+
+        if jags_adapt:
+            sumdiff_theta += n_adapt * abs(sampler.theta - theta_old)
+            sumdiff_phi   += n_adapt * abs(sampler.phi   - phi_old)
+            n_adapt += 1
+            if n_adapt > _JAGS_MIN_ADAPT:
+                lr_cfg.slice_w_theta = 2.0 * sumdiff_theta / n_adapt / (n_adapt - 1)
+                lr_cfg.slice_w_phi   = 2.0 * sumdiff_phi   / n_adapt / (n_adapt - 1)
+
         if (i + 1) % UPDATE_EVERY == 0 or i == n_w - 1:
             delta = (i + 1) - last
             last = i + 1
@@ -400,8 +422,10 @@ def _worker_with_queue(args):
         "p": p,
         "ll": ll,
         "mu_warmup":         mu_warmup,
-        "mean_theta_shrink": sampler._theta_shrink_total / n_steps,
-        "mean_theta_step":   sampler._theta_step_total   / n_steps,
+        "mean_theta_shrink":   sampler._theta_shrink_total / n_steps,
+        "mean_theta_step":     sampler._theta_step_total   / n_steps,
+        "adapted_slice_w_theta": float(lr_cfg.slice_w_theta),
+        "adapted_slice_w_phi":   float(lr_cfg.slice_w_phi),
     }
 
 
@@ -465,6 +489,7 @@ def sample_posterior(
     n_blas_threads: int | None = None,
     mu_prior_df: float = 10.0,
     slice_w: float = 1.5,
+    jags_adapt: bool = False,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -563,7 +588,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt)
             for cid in range(n_chains)
         ]
 
@@ -603,7 +628,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, False, False)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,
@@ -623,6 +648,7 @@ def sample_posterior(
         "mu_prior_scale": mu_prior_scale,
         "mu_prior_df": mu_prior_df,
         "slice_w": slice_w,
+        "jags_adapt": jags_adapt,
     }
 
 

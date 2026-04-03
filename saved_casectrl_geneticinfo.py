@@ -6,8 +6,9 @@ import subprocess
 import sys
 
 # Phenotype name and slice sampler width from command-line arguments
-PHENO   = sys.argv[1] if len(sys.argv) > 1 else "unknown"
-slice_w = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
+PHENO      = sys.argv[1] if len(sys.argv) > 1 else "unknown"
+slice_w    = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
+jags_adapt = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -63,20 +64,27 @@ result = sample_posterior(
     n_blas_threads=1,
     mu_prior_df=30.0,
     slice_w=slice_w,
+    jags_adapt=jags_adapt,
 )
 wall_time = time.time() - t0
 n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples
 print(f"Wall time: {wall_time:.1f}s  ({wall_time / n_iter_per_chain:.4f}s/iter per chain)")
 
-outfile = f"posterior_{PHENO}_sw{slice_w}.png"
+suffix = f"sw{slice_w}_adapted" if jags_adapt else f"sw{slice_w}"
+outfile = f"posterior_{PHENO}_{suffix}.png"
 summary = summarize_and_plot(result, outfile=outfile)
 
 # Slice sampler diagnostics
-shrinks = [d["mean_theta_shrink"] for d in result["chain_dicts"]]
-steps   = [d["mean_theta_step"]   for d in result["chain_dicts"]]
-print(f"Slice diagnostics (slice_w={slice_w}):")
+shrinks  = [d["mean_theta_shrink"]     for d in result["chain_dicts"]]
+steps    = [d["mean_theta_step"]       for d in result["chain_dicts"]]
+w_thetas = [d["adapted_slice_w_theta"] for d in result["chain_dicts"]]
+w_phis   = [d["adapted_slice_w_phi"]   for d in result["chain_dicts"]]
+print(f"Slice diagnostics (slice_w={slice_w}, jags_adapt={jags_adapt}):")
 print(f"  mean shrinkage steps/iter: {np.mean(shrinks):.2f}  (sd {np.std(shrinks):.2f})")
 print(f"  mean accepted |Δtheta|:    {np.mean(steps):.4f}  (sd {np.std(steps):.4f})")
+if jags_adapt:
+    print(f"  final adapted slice_w_theta: {np.mean(w_thetas):.4f}  (sd {np.std(w_thetas):.4f})")
+    print(f"  final adapted slice_w_phi:   {np.mean(w_phis):.4f}  (sd {np.std(w_phis):.4f})")
 
 # Save results: posterior samples + summary statistics + block metadata.
 # The relationship matrix (L) and per-block L sub-matrices are not saved.
@@ -86,7 +94,7 @@ block_info = blocks["block_info"]
 sizes  = np.array(sorted(block_info["sizes_summary"].keys()), dtype=np.int32)
 counts = np.array([block_info["sizes_summary"][s] for s in sizes], dtype=np.int32)
 
-results_file = f"results_{PHENO}_sw{slice_w}.npz"
+results_file = f"results_{PHENO}_{suffix}.npz"
 np.savez_compressed(
     results_file,
     # Posterior samples
@@ -104,9 +112,12 @@ np.savez_compressed(
     ess_bulk   = np.float64(summary["ess_bulk"]),
     r_hat      = np.float64(summary["r_hat"]),
     # Slice sampler diagnostics
-    slice_w           = np.float64(slice_w),
-    mean_theta_shrink = np.float64(np.mean(shrinks)),
-    mean_theta_step   = np.float64(np.mean(steps)),
+    slice_w_initial       = np.float64(slice_w),
+    jags_adapt            = np.bool_(jags_adapt),
+    mean_theta_shrink     = np.float64(np.mean(shrinks)),
+    mean_theta_step       = np.float64(np.mean(steps)),
+    adapted_slice_w_theta = np.float64(np.mean(w_thetas)),
+    adapted_slice_w_phi   = np.float64(np.mean(w_phis)),
     # Dataset metadata
     K              = np.float64(np.mean(y)),
     M              = np.int32(len(y)),
@@ -131,7 +142,7 @@ print(f"Results saved to {results_file}")
 # Remove all files except the two outputs so dxjupyterlab does not upload
 # the cloned repo, input data, and setup files to the project file store.
 import shutil
-_keep = {results_file, outfile}
+_keep = {results_file, outfile}  # suffix already encodes sw and adapt flag
 for _name in os.listdir("."):
     if _name not in _keep:
         if os.path.isdir(_name):
