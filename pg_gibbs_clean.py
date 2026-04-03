@@ -523,7 +523,7 @@ class PGGibbsBlockSampler:
         def lp(th: float) -> float:
             return logpost_theta_given_z(th, self.z, self.cfg.mu_prior_scale, self.cfg.mu_prior_df)
 
-        self.theta = slice_sample_1d(
+        self.theta, _ = slice_sample_1d(
             self.rng,
             self.theta,
             lp,
@@ -761,11 +761,13 @@ def slice_sample_1d(
         k -= 1
         steps += 1
 
+    n_shrink = 0
     for _ in range(100_000):
         x1 = float(rng.uniform(L, R))
         fx1 = float(logpdf(x1))
         if fx1 >= logy:
-            return x1
+            return x1, n_shrink
+        n_shrink += 1
         if x1 < x0:
             L = x1
         else:
@@ -996,6 +998,11 @@ class LRDiscreteBlockdiagPGGibbs:
         self.omega = np.ones(self.Lblk.M, dtype=np.float64)
         self.resample_omega()
 
+        # diagnostic accumulators
+        self._theta_shrink_total: int = 0
+        self._theta_step_total: float = 0.0
+        self._step_count: int = 0
+
     def current_p(self) -> float:
         return sigmoid_scalar(self.phi)
 
@@ -1089,11 +1096,11 @@ class LRDiscreteBlockdiagPGGibbs:
         u = self.rng.uniform(size=self.Lblk.M)
         self.r = np.where(u < prob_plus, 1.0, -1.0).astype(np.float64)
     
-        # 4) phi | rest (slice)  (keep as you have)
-        self.phi = float(slice_sample_1d(
+        # 4) phi | rest (slice)
+        self.phi, _ = slice_sample_1d(
             self.rng, self.phi, self.logpost_phi_given_rest,
             w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi
-        ))
+        )
     
         # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
         mu_cache = build_mu_collapsed_cache(
@@ -1105,10 +1112,14 @@ class LRDiscreteBlockdiagPGGibbs:
         def lp_theta(th: float) -> float:
             return logpost_theta_mu_collapsed(th, mu_cache)
     
-        self.theta = float(slice_sample_1d(
+        new_theta, n_shrink = slice_sample_1d(
             self.rng, self.theta, lp_theta,
             w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta
-        ))
+        )
+        self._theta_shrink_total += n_shrink
+        self._theta_step_total   += abs(new_theta - self.theta)
+        self._step_count         += 1
+        self.theta = new_theta
         self.mu = float(np.exp(self.theta))
     
         # 6) Refresh Zmix once more under the new mu (optional but usually helps)
@@ -1263,9 +1274,11 @@ def run_one_chain_preloaded_lrpg(
     n_w = lr_cfg.n_warmup
     n_s = lr_cfg.n_samples
 
-    # warmup
-    for _ in range(n_w):
+    # warmup — record mu trace for convergence diagnostics
+    mu_warmup = np.empty(n_w, dtype=np.float64)
+    for t in range(n_w):
         sampler.step()
+        mu_warmup[t] = sampler.mu
 
     mu = np.empty(n_s, dtype=np.float64)
     beta0 = np.empty(n_s, dtype=np.float64)  # == phi
@@ -1287,6 +1300,9 @@ def run_one_chain_preloaded_lrpg(
         "beta0": beta0,
         "p": p,
         "ll": ll,
+        "mu_warmup":         mu_warmup,
+        "mean_theta_shrink": sampler._theta_shrink_total / max(sampler._step_count, 1),
+        "mean_theta_step":   sampler._theta_step_total   / max(sampler._step_count, 1),
     }
 
 

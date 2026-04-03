@@ -277,6 +277,7 @@ def _make_chain_config(
     mu_prior_scale: float,
     p_prior_conc: float,
     mu_prior_df: float = 10.0,
+    slice_w: float = 1.5,
 ) -> ChainConfig:
     return ChainConfig(
         n_warmup=n_warmup,
@@ -285,7 +286,7 @@ def _make_chain_config(
         prior_scale=mu_prior_scale,
         mu_prior_df=mu_prior_df,
         beta0_sd=5.0,            # not used by LRDiscreteBlockdiagPGGibbs
-        slice_w=1.5,
+        slice_w=slice_w,
         slice_m=20,
         slice_max_steps=250,
         inner_latent_cycles=2,
@@ -457,6 +458,7 @@ def sample_posterior(
     corr_threshold: float = 0.0,
     n_blas_threads: int | None = None,
     mu_prior_df: float = 10.0,
+    slice_w: float = 1.5,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -535,7 +537,7 @@ def sample_posterior(
         gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
         _print_block_info(block_info)
 
-    cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc, mu_prior_df)
+    cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc, mu_prior_df, slice_w)
 
     n_cpu = os.cpu_count() or 1
     if n_blas_threads is None:
@@ -614,6 +616,7 @@ def sample_posterior(
         "cfg": cfg,
         "mu_prior_scale": mu_prior_scale,
         "mu_prior_df": mu_prior_df,
+        "slice_w": slice_w,
     }
 
 
