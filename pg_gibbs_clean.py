@@ -1128,7 +1128,46 @@ class LRDiscreteBlockdiagPGGibbs:
             self.phi, self.mu, self.r, self.v_L1
         )
 
+    def step_asis(self) -> Tuple[float, int]:
+        """
+        ASIS ancillary-statistic (AS) update for theta.
 
+        Complements the collapsed SS update in step(). Fixes the NCP
+        standardised residual u = (Zmix - mu*r)/sqrt(2*mu) and samples
+        theta from p(theta_nc | u, omega, phi, r, y), then reconstructs
+        Zmix = mu_new*r + sqrt(2*mu_new)*u.
+
+        Returns (new_theta, n_shrink) for diagnostics.
+        """
+        sq_mu = np.sqrt(2.0 * self.mu)
+        if sq_mu < 1e-300:
+            return self.theta, 0
+
+        u = (self.Zmix - self.mu * self.r) / sq_mu
+
+        mbar = float(np.tanh(0.5 * self.phi))
+        a = self.Lblk.matvec(self.r) - mbar * self.v_L1
+        b = self.Lblk.matvec(u)
+
+        def lp_nc(theta_nc: float) -> float:
+            if theta_nc < -745.0 or theta_nc > 709.0:
+                return -np.inf
+            mu_nc = float(np.exp(theta_nc))
+            eta = self.phi + mu_nc * a + np.sqrt(2.0 * mu_nc) * b
+            ll_aug = float(np.dot(self.kappa, eta) - 0.5 * np.dot(self.omega, eta * eta))
+            s  = float(self.cfg.mu_prior_scale)
+            df = float(self.cfg.mu_prior_df)
+            return ll_aug + theta_nc - 0.5 * (df + 1.0) * np.log(1.0 + (mu_nc / s) ** 2 / df)
+
+        new_theta, n_shrink = slice_sample_1d(
+            self.rng, self.theta, lp_nc,
+            w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta,
+        )
+        mu_new = float(np.exp(new_theta))
+        self.theta = new_theta
+        self.mu = mu_new
+        self.Zmix = mu_new * self.r + np.sqrt(2.0 * mu_new) * u
+        return new_theta, n_shrink
 
 
 

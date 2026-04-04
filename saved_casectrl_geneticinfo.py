@@ -10,6 +10,7 @@ PHENO            = sys.argv[1] if len(sys.argv) > 1 else "unknown"
 slice_w          = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
 jags_adapt       = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
 n_warmup_phase1  = int(sys.argv[4]) if len(sys.argv) > 4 else 0
+use_asis         = (sys.argv[5].lower() == "true") if len(sys.argv) > 5 else False
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -67,12 +68,15 @@ result = sample_posterior(
     slice_w=slice_w,
     jags_adapt=jags_adapt,
     n_warmup_phase1=n_warmup_phase1,
+    use_asis=use_asis,
 )
 wall_time = time.time() - t0
 n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples
 print(f"Wall time: {wall_time:.1f}s  ({wall_time / n_iter_per_chain:.4f}s/iter per chain)")
 
 suffix = f"sw{slice_w}_adapted" if jags_adapt else f"sw{slice_w}"
+if use_asis:
+    suffix += "_asis"
 outfile = f"posterior_{PHENO}_{suffix}.png"
 summary = summarize_and_plot(result, outfile=outfile)
 
@@ -87,6 +91,13 @@ print(f"  mean accepted |Δtheta|:    {np.mean(steps):.4f}  (sd {np.std(steps):.
 if jags_adapt:
     print(f"  final adapted slice_w_theta: {np.mean(w_thetas):.4f}  (sd {np.std(w_thetas):.4f})")
     print(f"  final adapted slice_w_phi:   {np.mean(w_phis):.4f}  (sd {np.std(w_phis):.4f})")
+
+if use_asis:
+    asis_shrinks = [d["mean_asis_shrink"] for d in result["chain_dicts"]]
+    asis_steps   = [d["mean_asis_step"]   for d in result["chain_dicts"]]
+    print(f"ASIS diagnostics:")
+    print(f"  mean shrinkage steps/iter: {np.mean(asis_shrinks):.2f}  (sd {np.std(asis_shrinks):.2f})")
+    print(f"  mean accepted |Δtheta|:    {np.mean(asis_steps):.4f}  (sd {np.std(asis_steps):.4f})")
 
 # Save results: posterior samples + summary statistics + block metadata.
 # The relationship matrix (L) and per-block L sub-matrices are not saved.
@@ -120,6 +131,9 @@ np.savez_compressed(
     mean_theta_step       = np.float64(np.mean(steps)),
     adapted_slice_w_theta = np.float64(np.mean(w_thetas)),
     adapted_slice_w_phi   = np.float64(np.mean(w_phis)),
+    use_asis              = np.bool_(use_asis),
+    mean_asis_shrink      = np.float64(np.mean([d["mean_asis_shrink"] for d in result["chain_dicts"]])),
+    mean_asis_step        = np.float64(np.mean([d["mean_asis_step"]   for d in result["chain_dicts"]])),
     # Dataset metadata
     K              = np.float64(np.mean(y)),
     M              = np.int32(len(y)),

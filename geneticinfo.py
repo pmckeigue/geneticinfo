@@ -362,6 +362,7 @@ def _worker_with_queue(args):
 
     jags_adapt       = args[7] if len(args) > 7 else False
     n_warmup_phase1  = int(args[8]) if len(args) > 8 else 0
+    use_asis         = bool(args[9]) if len(args) > 9 else False
 
     # Two-phase warmup when jags_adapt=True and n_warmup_phase1 > 0:
     #   Phase 1 (iterations 0..n_warmup_phase1-1): fixed slice_w, no adaptation.
@@ -375,12 +376,22 @@ def _worker_with_queue(args):
     sumdiff_phi   = 0.0
     n_adapt       = 0
 
+    asis_shrink_total = 0
+    asis_step_total   = 0.0
+    asis_count        = 0
+
     mu_warmup = np.empty(n_w, dtype=np.float64)
     last = 0
     for i in range(n_w):
         theta_old = sampler.theta
         phi_old   = sampler.phi
         sampler.step()
+        if use_asis:
+            theta_pre_asis = sampler.theta
+            _, n_shrink = sampler.step_asis()
+            asis_shrink_total += n_shrink
+            asis_step_total   += abs(sampler.theta - theta_pre_asis)
+            asis_count        += 1
         mu_warmup[i] = sampler.mu
 
         if jags_adapt and i >= n_warmup_phase1:
@@ -406,6 +417,12 @@ def _worker_with_queue(args):
     last = 0
     for t in range(n_s):
         sampler.step()
+        if use_asis:
+            theta_pre_asis = sampler.theta
+            _, n_shrink = sampler.step_asis()
+            asis_shrink_total += n_shrink
+            asis_step_total   += abs(sampler.theta - theta_pre_asis)
+            asis_count        += 1
         mu[t] = sampler.mu
         beta0[t] = sampler.phi
         p[t] = sampler.current_p()
@@ -430,6 +447,8 @@ def _worker_with_queue(args):
         "mean_theta_step":     sampler._theta_step_total   / n_steps,
         "adapted_slice_w_theta": float(lr_cfg.slice_w_theta),
         "adapted_slice_w_phi":   float(lr_cfg.slice_w_phi),
+        "mean_asis_shrink":    asis_shrink_total / max(asis_count, 1),
+        "mean_asis_step":      asis_step_total   / max(asis_count, 1),
     }
 
 
@@ -495,6 +514,7 @@ def sample_posterior(
     slice_w: float = 1.5,
     jags_adapt: bool = False,
     n_warmup_phase1: int = 0,
+    use_asis: bool = False,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -593,7 +613,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis)
             for cid in range(n_chains)
         ]
 
@@ -633,7 +653,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,
@@ -654,6 +674,7 @@ def sample_posterior(
         "mu_prior_df": mu_prior_df,
         "slice_w": slice_w,
         "jags_adapt": jags_adapt,
+        "use_asis": use_asis,
     }
 
 
