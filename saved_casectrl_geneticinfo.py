@@ -60,8 +60,8 @@ t0 = time.time()
 result = sample_posterior(
     L, y,
     blocks=blocks,
-    n_warmup=2000,
-    n_samples=2000,
+    n_warmup=5000,
+    n_samples=5000,
     n_chains=8,
     n_blas_threads=1,
     mu_prior_df=30.0,
@@ -114,8 +114,9 @@ np.savez_compressed(
     mu_samples    = np.concatenate([d["mu"]    for d in result["chain_dicts"]]),
     beta0_samples = np.concatenate([d["beta0"] for d in result["chain_dicts"]]),
     p_samples     = np.concatenate([d["p"]     for d in result["chain_dicts"]]),
-    # Warmup trace (n_chains x n_warmup) for convergence diagnostics
+    # Warmup traces (n_chains x n_warmup) for convergence diagnostics
     mu_warmup     = np.vstack([d["mu_warmup"] for d in result["chain_dicts"]]),
+    ll_warmup     = np.vstack([d["ll_warmup"] for d in result["chain_dicts"]]),
     # Posterior summary
     mu_mean    = np.float64(summary["mean"]),
     mu_median  = np.float64(summary["median"]),
@@ -155,10 +156,33 @@ np.savez_compressed(
 )
 print(f"Results saved to {results_file}")
 
-# Remove all files except the two outputs so dxjupyterlab does not upload
+# Warmup trace plot (mu and log-likelihood vs iteration, one line per chain)
+trace_file = f"trace_{PHENO}_{suffix}.png"
+mu_wu = np.vstack([d["mu_warmup"] for d in result["chain_dicts"]])
+ll_wu = np.vstack([d["ll_warmup"] for d in result["chain_dicts"]])
+fig, axes = plt.subplots(2, 1, figsize=(12, 7), sharex=True)
+for c in range(mu_wu.shape[0]):
+    axes[0].plot(mu_wu[c], alpha=0.6, lw=0.7)
+axes[0].set_ylabel("mu")
+axes[0].set_title(f"Warmup trace — {PHENO}  {suffix}  (n_warmup={result['cfg'].n_warmup})")
+for c in range(ll_wu.shape[0]):
+    axes[1].plot(ll_wu[c], alpha=0.6, lw=0.7)
+axes[1].set_ylabel("log-likelihood")
+axes[1].set_xlabel("warmup iteration")
+if n_warmup_phase1 > 0:
+    for ax in axes:
+        ax.axvline(n_warmup_phase1, color="k", ls="--", lw=1,
+                   label=f"adaptation start (iter {n_warmup_phase1})")
+    axes[0].legend(fontsize=8)
+plt.tight_layout()
+plt.savefig(trace_file, dpi=100)
+plt.close()
+print(f"Warmup trace saved to {trace_file}")
+
+# Remove all files except outputs so dxjupyterlab does not upload
 # the cloned repo, input data, and setup files to the project file store.
 import shutil
-_keep = {results_file, outfile}  # suffix already encodes sw and adapt flag
+_keep = {results_file, outfile, trace_file}
 for _name in os.listdir("."):
     if _name not in _keep:
         if os.path.isdir(_name):

@@ -381,6 +381,7 @@ def _worker_with_queue(args):
     asis_count        = 0
 
     mu_warmup = np.empty(n_w, dtype=np.float64)
+    ll_warmup = np.empty(n_w, dtype=np.float64)
     last = 0
     for i in range(n_w):
         theta_old = sampler.theta
@@ -393,6 +394,7 @@ def _worker_with_queue(args):
             asis_step_total   += abs(sampler.theta - theta_pre_asis)
             asis_count        += 1
         mu_warmup[i] = sampler.mu
+        ll_warmup[i] = bernoulli_loglik_logit_np(sampler.current_eta(), y_perm)
 
         if jags_adapt and i >= n_warmup_phase1:
             sumdiff_theta += n_adapt * abs(sampler.theta - theta_old)
@@ -443,6 +445,7 @@ def _worker_with_queue(args):
         "p": p,
         "ll": ll,
         "mu_warmup":         mu_warmup,
+        "ll_warmup":         ll_warmup,
         "mean_theta_shrink":   sampler._theta_shrink_total / n_steps,
         "mean_theta_step":     sampler._theta_step_total   / n_steps,
         "adapted_slice_w_theta": float(lr_cfg.slice_w_theta),
