@@ -135,9 +135,9 @@ download_results() {
     mkdir -p "${LOCAL_OUTPUT_DIR}"
     for f in "${RESULT_FILES[@]}"; do
         # When duplicate remote files exist (from earlier runs), pick the most
-        # recently created one by file ID (dx find data returns oldest first).
+        # recently created one by file ID (dx find data returns newest first).
         local file_id
-        file_id=$(dx find data --brief --name "${f}" --path "${REMOTE_OUTPUT_DIR}" 2>/dev/null | tail -1)
+        file_id=$(dx find data --brief --name "${f}" --path "${REMOTE_OUTPUT_DIR}" 2>/dev/null | head -1)
         if [[ -z "${file_id}" ]]; then
             echo "ERROR: remote file not found: ${REMOTE_OUTPUT_DIR}/${f}" >&2
             return 1
