@@ -360,12 +360,16 @@ def _worker_with_queue(args):
     n_s = lr_cfg.n_samples
     UPDATE_EVERY = 50
 
-    jags_adapt = args[7] if len(args) > 7 else False
+    jags_adapt       = args[7] if len(args) > 7 else False
+    n_warmup_phase1  = int(args[8]) if len(args) > 8 else 0
 
-    # JAGS-style adaptation of slice widths during warmup (Neal 2003 / JAGS Slicer.cc).
-    # Tracks linearly-weighted running average of |Δtheta| and |Δphi|;
-    # targets w = 2 * weighted_mean(|displacement|).  Adaptation freezes
-    # at end of warmup; sampling phase uses the final adapted widths.
+    # Two-phase warmup when jags_adapt=True and n_warmup_phase1 > 0:
+    #   Phase 1 (iterations 0..n_warmup_phase1-1): fixed slice_w, no adaptation.
+    #             Brings the chain close to stationarity before adaptation begins.
+    #   Phase 2 (iterations n_warmup_phase1..n_w-1): JAGS adaptation.
+    #             Adapts slice widths using linearly-weighted mean of |displacement|
+    #             (JAGS 4.x Slicer.cc: w = 2 * sumdiff / iter / (iter-1)).
+    # When jags_adapt=False, the single loop runs as before with no adaptation.
     _JAGS_MIN_ADAPT = 50
     sumdiff_theta = 0.0
     sumdiff_phi   = 0.0
@@ -379,7 +383,7 @@ def _worker_with_queue(args):
         sampler.step()
         mu_warmup[i] = sampler.mu
 
-        if jags_adapt:
+        if jags_adapt and i >= n_warmup_phase1:
             sumdiff_theta += n_adapt * abs(sampler.theta - theta_old)
             sumdiff_phi   += n_adapt * abs(sampler.phi   - phi_old)
             n_adapt += 1
@@ -490,6 +494,7 @@ def sample_posterior(
     mu_prior_df: float = 10.0,
     slice_w: float = 1.5,
     jags_adapt: bool = False,
+    n_warmup_phase1: int = 0,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -588,7 +593,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1)
             for cid in range(n_chains)
         ]
 
@@ -628,7 +633,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,

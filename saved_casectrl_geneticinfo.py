@@ -6,9 +6,10 @@ import subprocess
 import sys
 
 # Phenotype name and slice sampler width from command-line arguments
-PHENO      = sys.argv[1] if len(sys.argv) > 1 else "unknown"
-slice_w    = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
-jags_adapt = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
+PHENO            = sys.argv[1] if len(sys.argv) > 1 else "unknown"
+slice_w          = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
+jags_adapt       = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
+n_warmup_phase1  = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -58,13 +59,14 @@ t0 = time.time()
 result = sample_posterior(
     L, y,
     blocks=blocks,
-    n_warmup=1000,
+    n_warmup=2000,
     n_samples=2000,
     n_chains=8,
     n_blas_threads=1,
     mu_prior_df=30.0,
     slice_w=slice_w,
     jags_adapt=jags_adapt,
+    n_warmup_phase1=n_warmup_phase1,
 )
 wall_time = time.time() - t0
 n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples

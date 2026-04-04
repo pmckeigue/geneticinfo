@@ -12,6 +12,6 @@ for SLICE_W in 0.5 1.0; do
     bash run_dnanexus_job.sh casectrl_geneticinfo.cfg
 done
 
-# JAGS-adaptive run starting from slice_w=1.0
-export SLICE_W="1.0" JAGS_ADAPT="true"
+# JAGS-adaptive run: phase 1 (1000 iters, fixed w=0.5), phase 2 (1000 iters, adapt)
+export SLICE_W="0.5" JAGS_ADAPT="true" N_WARMUP_PHASE1="1000"
 bash run_dnanexus_job.sh casectrl_geneticinfo.cfg
