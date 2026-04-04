@@ -10,7 +10,8 @@ PHENO            = sys.argv[1] if len(sys.argv) > 1 else "unknown"
 slice_w          = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
 jags_adapt       = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
 n_warmup_phase1  = int(sys.argv[4]) if len(sys.argv) > 4 else 0
-use_asis         = (sys.argv[5].lower() == "true") if len(sys.argv) > 5 else False
+use_asis          = (sys.argv[5].lower() == "true") if len(sys.argv) > 5 else False
+use_alpha_reparam = (sys.argv[6].lower() == "true") if len(sys.argv) > 6 else False
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -69,6 +70,7 @@ result = sample_posterior(
     jags_adapt=jags_adapt,
     n_warmup_phase1=n_warmup_phase1,
     use_asis=use_asis,
+    use_alpha_reparam=use_alpha_reparam,
 )
 wall_time = time.time() - t0
 n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples
@@ -77,6 +79,8 @@ print(f"Wall time: {wall_time:.1f}s  ({wall_time / n_iter_per_chain:.4f}s/iter p
 suffix = f"sw{slice_w}_adapted" if jags_adapt else f"sw{slice_w}"
 if use_asis:
     suffix += "_asis"
+if use_alpha_reparam:
+    suffix += "_ar"
 outfile = f"posterior_{PHENO}_{suffix}.png"
 summary = summarize_and_plot(result, outfile=outfile)
 

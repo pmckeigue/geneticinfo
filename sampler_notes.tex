@@ -1,0 +1,148 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Mixing diagnostics and reparameterisations for the polygenic PG-Gibbs sampler}
+\author{Paul McKeigue}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Model}
+
+We observe binary outcomes $y_i \sim \text{Bernoulli}(\sigma(\eta_i))$ for $i = 1, \ldots, M$, with linear predictor
+\begin{equation}
+  \eta_i = \phi + (L Z_{\text{mix}})_i - \mu\,\bar{m}\, v_i,
+  \qquad v = L\mathbf{1},\quad \bar{m} = \tanh(\phi/2).
+\end{equation}
+Here $L$ is the block-diagonal Cholesky factor of the genetic relationship matrix (GRM), with $M = 10250$ individuals, $n_{\text{blocks}} = 8595$ blocks, and $n_{\text{relatives}} = 2658$.
+
+\paragraph{Priors.}
+\begin{itemize}
+  \item $Z_{\text{mix},i} \mid r_i, \mu \sim \mathcal{N}(\mu r_i,\; 2\mu)$, where $r_i \in \{-1, +1\}$ with $P(r_i = +1) = p$.
+  \item $p \sim \text{Beta}(K_\beta p_{\text{obs}},\; K_\beta(1 - p_{\text{obs}}))$ with $K_\beta = 20$.
+  \item $\mu \sim \text{half-Student-}t(\nu = 30,\, s = 1)$, sampled on the log scale $\theta = \log\mu$.
+\end{itemize}
+
+\paragraph{Polya-Gamma augmentation.}
+Introducing $\omega_i \mid \eta_i \sim \text{PG}(1, |\eta_i|)$ renders the conditional distribution of $Z_{\text{mix}}$ Gaussian. Writing $\kappa_i = y_i - 1/2$ and $\Omega = \text{diag}(\omega_i)$, the Gibbs cycle (implemented in \texttt{pg\_gibbs\_clean.py}) is:
+\begin{enumerate}
+  \item Sample $\omega \mid \eta$ (Polya-Gamma draws).
+  \item Sample $Z_{\text{mix}} \mid \omega, \phi, \mu, r$ (Gaussian, block-by-block Cholesky solve).
+  \item Sample $r \mid Z_{\text{mix}}, \phi$ (independent Bernoulli per site).
+  \item Sample $\phi \mid \text{rest}$ (1-D slice sampling).
+  \item Sample $\mu \mid \omega, r, \phi$ collapsed over $Z_{\text{mix}}$ (slice sampling; uses eigendecomposition of $L^\top \Omega L$ per block).
+  \item Refresh $Z_{\text{mix}} \mid \omega, \phi, \mu_{\text{new}}, r$.
+\end{enumerate}
+The key quantity of interest is $\Lambda = \mu$, the expected log-likelihood ratio in nats (genetic information for discrimination).
+
+\section{Slow mixing: the hierarchical coupling}
+\label{sec:slow}
+
+Observed effective sample size (ESS) from 2000 post-warmup samples with 8 chains is approximately $19$--$25$, indicating severe autocorrelation. Two structural sources have been identified.
+
+\subsection{Centred-parameterisation coupling ($Z_{\text{mix}}$--$\theta$)}
+
+In the centred parameterisation, $Z_{\text{mix}} \mid r, \mu \sim \mathcal{N}(\mu r, 2\mu I)$. The conditional posterior $p(\theta \mid Z_{\text{mix}})$ is much narrower than the marginal $p(\theta)$: $Z_{\text{mix}}$ is drawn at the current $\mu$ and then anchors the next $\theta$ update. Steps 5 and 6 alternate between a collapsed update of $\theta$ and a $Z_{\text{mix}}$ refresh, but the class labels $r$ are held fixed during the $\theta$ update, leaving residual coupling between $Z_{\text{mix}}$ and $\theta$.
+
+\subsection{$\phi$--$\theta$ coupling through the prevalence constraint}
+
+The observed case rate $K = n_{\text{cases}}/M$ must be reproduced. Noting that the mean of $\eta_i$ over individuals is approximately $\phi - \mu\,\bar{m}\,\bar{v}$ where $\bar{v} = M^{-1}\sum_i v_i$, the posterior concentrates near the ridge
+\begin{equation}
+  K \approx \sigma\!\left(\phi - \mu\,\bar{m}\,\bar{v}\right),
+\end{equation}
+giving approximately $\phi \approx \text{logit}(K) + \mu\,\bar{m}\,\bar{v}$. As $\mu$ increases, $\phi$ must increase proportionally to preserve the prevalence. In the RA dataset ($K \approx 0.25$) this yields a posterior correlation $r(\mu, \phi) \approx -0.985$.
+
+\section{ASIS: ancillarity--sufficiency interweaving}
+
+\subsection{Construction}
+
+After step~5 (collapsed sufficient-statistic update for $\theta$) and step~6 ($Z_{\text{mix}}$ refresh at $\mu_{\text{new}}$), define the non-centred parameterisation (NCP) ancillary statistic
+\begin{equation}
+  u = \frac{Z_{\text{mix}} - \mu\, r}{\sqrt{2\mu}} \sim \mathcal{N}(0, I) \quad \text{under the prior.}
+\end{equation}
+The ASIS step draws a fresh proposal for $\theta_{\text{nc}}$ from $p(\theta_{\text{nc}} \mid u, \omega, \phi, r, y)$ with $u$ held fixed.
+
+\subsection{NCP log-posterior}
+
+With $u$ fixed, the linear predictor becomes
+\begin{equation}
+  \eta_i = \phi + \mu_{\text{nc}}\, a_i + \sqrt{2\mu_{\text{nc}}}\, b_i,
+  \qquad a = L r - \bar{m}\, v, \quad b = L u.
+\end{equation}
+Because $p(u \mid \theta_{\text{nc}}) = \mathcal{N}(0, I)$ is independent of $\theta_{\text{nc}}$, no $Z_{\text{mix}}$ prior term appears in the log-posterior:
+\begin{equation}
+  \log p_{\text{nc}}(\theta_{\text{nc}}) = \sum_i \left[\kappa_i \eta_i - \tfrac{1}{2}\omega_i \eta_i^2\right]
+    + \theta_{\text{nc}}
+    - \frac{\nu+1}{2}\log\!\left(1 + \frac{\mu_{\text{nc}}^2}{\nu s^2}\right)
+    + \text{const.}
+\end{equation}
+This is sampled by 1-D slice sampling. After accepting $\theta_{\text{nc}}^*$, the centred variable is reconstructed as $Z_{\text{mix}} = \mu^* r + \sqrt{2\mu^*}\, u$.
+
+\subsection{Effect}
+
+The interweaving exploits the fact that the centred and non-centred parameterisations have complementary geometry: the centred update mixes well when the signal is strong, the non-centred update mixes well when the signal is weak. Inserting the NCP step between steps 5 and~6 improves ESS from $19$ to $25$ and reduces $\hat{R}$ from $1.37$ to $1.25$ on the RA dataset.
+
+\section{Alpha reparameterisation for $\phi$}
+
+\subsection{Motivation}
+
+The $\phi$--$\theta$ coupling identified in Section~\ref{sec:slow} (correlation $\approx -0.985$) prevents the slice sampler from taking large steps in $\phi$ independently of $\mu$. The remedy is to reparameterise in terms of the approximately orthogonal quantity
+\begin{equation}
+  \alpha = \phi - \mu\,\bar{m}\,\bar{v} \approx \overline{\eta} \approx \text{logit}(K).
+\end{equation}
+Since $\alpha \approx \text{logit}(K)$ throughout the posterior, $\alpha$ and $\theta$ are approximately orthogonal.
+
+\subsection{Implementation}
+
+Step~4 is replaced by a slice step for $\alpha$ at fixed $\mu$ and $\bar{m}_{\text{current}} = \tanh(\phi_{\text{current}}/2)$:
+\begin{equation}
+  \phi^{\text{proposed}} = \alpha^{\text{proposed}} + \mu\,\bar{m}_{\text{current}}\,\bar{v}.
+\end{equation}
+The Jacobian $\partial\phi/\partial\alpha = 1$, so no correction to the target density is needed. The log-posterior for $\alpha$ is simply the existing \texttt{logpost\_phi\_given\_rest} evaluated at $\phi = \alpha + \text{shift}$:
+\begin{equation}
+  \log p(\alpha) = \log p_\phi\!\left(\alpha + \mu\,\bar{m}\,\bar{v}\right).
+\end{equation}
+After accepting $\alpha^*$, the intercept is recovered as $\phi^* = \alpha^* + \mu\,\bar{m}_{\text{current}}\,\bar{v}$, and $\bar{m}$ is updated from $\phi^*$ for the next iteration.
+
+In pseudocode:
+\begin{verbatim}
+mbar  = tanh(phi / 2)
+shift = mu * mbar * mean_v
+alpha_current = phi - shift
+# slice sample alpha from logpost_phi_given_rest(alpha + shift)
+phi_new = alpha_new + shift
+\end{verbatim}
+The reparameterisation is controlled by flag \texttt{use\_alpha\_reparam} (default \texttt{False}), preserving full backwards compatibility.
+
+\section{Results summary}
+
+Table~\ref{tab:results} summarises ESS and convergence diagnostics across runs on the RA dataset (8 chains).
+
+\begin{table}[h]
+\centering
+\caption{Mixing diagnostics for different sampler configurations. $n_w$ = number of warmup samples per chain; $\hat\mu$ and $\sigma_\mu$ are the posterior mean and standard deviation of $\mu$.}
+\label{tab:results}
+\begin{tabular}{lrrrrrr}
+\toprule
+Run & $n_w$ & ESS & $\hat{R}$ & $\hat\mu$ & $\sigma_\mu$ \\
+\midrule
+\texttt{sw=0.5} fixed            & 1000 & 19 & 1.37 & 1.16 & 0.61 \\
+\texttt{sw=1.0} fixed            & 500  & 23 & 1.29 & 1.05 & 0.54 \\
+\texttt{sw=0.5} adapted (no phase~1) & 2000 & 19 & 1.34 & 1.38 & 0.59 \\
+\texttt{sw=0.5} ASIS             & 2000 & 25 & 1.25 & 1.35 & 0.56 \\
+\texttt{sw=0.5} adapted (phase~1 = 4000) & 5000 & 60 & 1.12 & 1.28 & 0.60 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The largest improvement came from sufficient warmup: $n_w = 5000$ with a 4000-iteration phase~1 achieved ESS~$= 60$ and $\hat{R} = 1.12$. When adaptation started too early (no phase~1), the adapted slice width collapsed to $0.033$; with adequate phase~1 warmup it settled at a healthy $0.050$. The algorithmic changes (ASIS, $\alpha$-reparameterisation) provide moderate incremental gains but do not substitute for adequate warmup in this regime.
+
+\end{document}

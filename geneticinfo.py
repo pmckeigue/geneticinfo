@@ -345,6 +345,7 @@ def _worker_with_queue(args):
         slice_m_phi=int(cfg.slice_m),
         slice_w_theta=float(cfg.slice_w),
         slice_m_theta=int(cfg.slice_m),
+        use_alpha_reparam=use_alpha_reparam,
     )
 
     sampler = LRDiscreteBlockdiagPGGibbs(
@@ -360,9 +361,10 @@ def _worker_with_queue(args):
     n_s = lr_cfg.n_samples
     UPDATE_EVERY = 50
 
-    jags_adapt       = args[7] if len(args) > 7 else False
-    n_warmup_phase1  = int(args[8]) if len(args) > 8 else 0
-    use_asis         = bool(args[9]) if len(args) > 9 else False
+    jags_adapt          = args[7] if len(args) > 7 else False
+    n_warmup_phase1     = int(args[8]) if len(args) > 8 else 0
+    use_asis            = bool(args[9]) if len(args) > 9 else False
+    use_alpha_reparam   = bool(args[10]) if len(args) > 10 else False
 
     # Two-phase warmup when jags_adapt=True and n_warmup_phase1 > 0:
     #   Phase 1 (iterations 0..n_warmup_phase1-1): fixed slice_w, no adaptation.
@@ -518,6 +520,7 @@ def sample_posterior(
     jags_adapt: bool = False,
     n_warmup_phase1: int = 0,
     use_asis: bool = False,
+    use_alpha_reparam: bool = False,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -616,7 +619,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam)
             for cid in range(n_chains)
         ]
 
@@ -656,7 +659,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,
@@ -678,6 +681,7 @@ def sample_posterior(
         "slice_w": slice_w,
         "jags_adapt": jags_adapt,
         "use_asis": use_asis,
+        "use_alpha_reparam": use_alpha_reparam,
     }
 
 

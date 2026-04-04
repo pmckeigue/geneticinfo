@@ -942,6 +942,9 @@ class LRBlockdiagPGConfig:
     slice_w_theta: float = 1.0
     slice_m_theta: int = 20
 
+    # alpha reparameterisation for phi (decouples phi from theta via K constraint)
+    use_alpha_reparam: bool = False
+
 
 class LRDiscreteBlockdiagPGGibbs:
     """
@@ -975,6 +978,7 @@ class LRDiscreteBlockdiagPGGibbs:
 
         # precompute v = L @ 1 (used for centring shift)
         self.v_L1 = self.Lblk.matvec(np.ones(self.Lblk.M, dtype=np.float64))
+        self.mean_v = float(np.mean(self.v_L1))
 
         # initialise phi near logit(p_obs)
         if phi_init is None:
@@ -1096,11 +1100,23 @@ class LRDiscreteBlockdiagPGGibbs:
         u = self.rng.uniform(size=self.Lblk.M)
         self.r = np.where(u < prob_plus, 1.0, -1.0).astype(np.float64)
     
-        # 4) phi | rest (slice)
-        self.phi, _ = slice_sample_1d(
-            self.rng, self.phi, self.logpost_phi_given_rest,
-            w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi
-        )
+        # 4) phi | rest (slice); optionally via alpha = phi - mu*mbar*mean_v
+        # which decouples phi from theta through the prevalence constraint K.
+        if self.cfg.use_alpha_reparam:
+            mbar  = float(np.tanh(0.5 * self.phi))
+            shift = self.mu * mbar * self.mean_v
+            def lp_alpha(alpha: float) -> float:
+                return self.logpost_phi_given_rest(alpha + shift)
+            new_alpha, _ = slice_sample_1d(
+                self.rng, self.phi - shift, lp_alpha,
+                w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+            )
+            self.phi = new_alpha + shift
+        else:
+            self.phi, _ = slice_sample_1d(
+                self.rng, self.phi, self.logpost_phi_given_rest,
+                w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+            )
     
         # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
         mu_cache = build_mu_collapsed_cache(
