@@ -61,8 +61,8 @@ t0 = time.time()
 result = sample_posterior(
     L, y,
     blocks=blocks,
-    n_warmup=5000,
-    n_samples=5000,
+    n_warmup=500,
+    n_samples=1000,
     n_chains=8,
     n_blas_threads=1,
     mu_prior_df=30.0,

@@ -326,6 +326,10 @@ def _worker_with_queue(args):
     chain_id, gb, y_perm, seed, cfg = args[:5]
     true_mu = args[5] if len(args) > 5 else float("nan")
     p_obs_override = args[6] if len(args) > 6 else None
+    jags_adapt          = args[7] if len(args) > 7 else False
+    n_warmup_phase1     = int(args[8]) if len(args) > 8 else 0
+    use_asis            = bool(args[9]) if len(args) > 9 else False
+    use_alpha_reparam   = bool(args[10]) if len(args) > 10 else False
     q = _POOL_PROGRESS_Q
 
     rng = np.random.default_rng(seed)
@@ -360,11 +364,6 @@ def _worker_with_queue(args):
     n_w = lr_cfg.n_warmup
     n_s = lr_cfg.n_samples
     UPDATE_EVERY = 50
-
-    jags_adapt          = args[7] if len(args) > 7 else False
-    n_warmup_phase1     = int(args[8]) if len(args) > 8 else 0
-    use_asis            = bool(args[9]) if len(args) > 9 else False
-    use_alpha_reparam   = bool(args[10]) if len(args) > 10 else False
 
     # Two-phase warmup when jags_adapt=True and n_warmup_phase1 > 0:
     #   Phase 1 (iterations 0..n_warmup_phase1-1): fixed slice_w, no adaptation.
