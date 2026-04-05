@@ -11,7 +11,8 @@ slice_w          = float(sys.argv[2]) if len(sys.argv) > 2 else 1.5
 jags_adapt       = (sys.argv[3].lower() == "true") if len(sys.argv) > 3 else False
 n_warmup_phase1  = int(sys.argv[4]) if len(sys.argv) > 4 else 0
 use_asis          = (sys.argv[5].lower() == "true") if len(sys.argv) > 5 else False
-use_alpha_reparam = (sys.argv[6].lower() == "true") if len(sys.argv) > 6 else False
+use_alpha_reparam  = (sys.argv[6].lower() == "true") if len(sys.argv) > 6 else False
+use_phi_correction = (sys.argv[7].lower() == "true") if len(sys.argv) > 7 else False
 
 # Suppress BLAS threading contention when running multiple chains via fork.
 os.environ.setdefault("MKL_NUM_THREADS", "1")
@@ -71,6 +72,7 @@ result = sample_posterior(
     n_warmup_phase1=n_warmup_phase1,
     use_asis=use_asis,
     use_alpha_reparam=use_alpha_reparam,
+    use_phi_correction=use_phi_correction,
 )
 wall_time = time.time() - t0
 n_iter_per_chain = result["cfg"].n_warmup + result["cfg"].n_samples
@@ -81,6 +83,8 @@ if use_asis:
     suffix += "_asis"
 if use_alpha_reparam:
     suffix += "_ar"
+if use_phi_correction:
+    suffix += "_pc"
 outfile = f"posterior_{PHENO}_{suffix}.png"
 summary = summarize_and_plot(result, outfile=outfile)
 
@@ -137,6 +141,7 @@ np.savez_compressed(
     adapted_slice_w_theta = np.float64(np.mean(w_thetas)),
     adapted_slice_w_phi   = np.float64(np.mean(w_phis)),
     use_asis              = np.bool_(use_asis),
+    use_phi_correction    = np.bool_(use_phi_correction),
     mean_asis_shrink      = np.float64(np.mean([d["mean_asis_shrink"] for d in result["chain_dicts"]])),
     mean_asis_step        = np.float64(np.mean([d["mean_asis_step"]   for d in result["chain_dicts"]])),
     # Dataset metadata

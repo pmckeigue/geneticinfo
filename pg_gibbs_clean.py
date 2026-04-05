@@ -945,6 +945,11 @@ class LRBlockdiagPGConfig:
     # alpha reparameterisation for phi (decouples phi from theta via K constraint)
     use_alpha_reparam: bool = False
 
+    # phi correction: after the collapsed theta update, shift phi by
+    # Δmu·tanh(φ/2)·mean_v (approximate K-preserving correction) then
+    # re-sample phi from its exact conditional given the new mu.
+    use_phi_correction: bool = False
+
 
 class LRDiscreteBlockdiagPGGibbs:
     """
@@ -1119,15 +1124,16 @@ class LRDiscreteBlockdiagPGGibbs:
             )
     
         # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
+        mu_before = self.mu
         mu_cache = build_mu_collapsed_cache(
             self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
             mu_prior_scale=self.cfg.mu_prior_scale,
             mu_prior_df=self.cfg.mu_prior_df,
         )
-    
+
         def lp_theta(th: float) -> float:
             return logpost_theta_mu_collapsed(th, mu_cache)
-    
+
         new_theta, n_shrink = slice_sample_1d(
             self.rng, self.theta, lp_theta,
             w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta
@@ -1137,7 +1143,19 @@ class LRDiscreteBlockdiagPGGibbs:
         self._step_count         += 1
         self.theta = new_theta
         self.mu = float(np.exp(self.theta))
-    
+
+        # 5b) phi correction: shift phi by approximate K-preserving amount
+        # Δmu·tanh(φ/2)·mean_v, then re-sample phi from its exact conditional
+        # given the new mu.  The correction sets a better starting point; the
+        # subsequent slice sample is exact so the chain remains ergodic.
+        if self.cfg.use_phi_correction:
+            delta_mu = self.mu - mu_before
+            self.phi += delta_mu * float(np.tanh(0.5 * self.phi)) * self.mean_v
+            self.phi, _ = slice_sample_1d(
+                self.rng, self.phi, self.logpost_phi_given_rest,
+                w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+            )
+
         # 6) Refresh Zmix once more under the new mu (optional but usually helps)
         self.Zmix = sample_Zmix_given_omega(
             self.rng, self.Lblk, self.omega, self.kappa,
