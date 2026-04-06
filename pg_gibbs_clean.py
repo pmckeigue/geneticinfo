@@ -1124,7 +1124,8 @@ class LRDiscreteBlockdiagPGGibbs:
             )
     
         # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
-        mu_before = self.mu
+        mu_before    = self.mu
+        theta_before = self.theta
         mu_cache = build_mu_collapsed_cache(
             self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
             mu_prior_scale=self.cfg.mu_prior_scale,
@@ -1144,13 +1145,14 @@ class LRDiscreteBlockdiagPGGibbs:
         self.theta = new_theta
         self.mu = float(np.exp(self.theta))
 
-        # 5b) phi correction: shift phi by approximate K-preserving amount
-        # Δmu·tanh(φ/2)·mean_v, then re-sample phi from its exact conditional
-        # given the new mu.  The correction sets a better starting point; the
-        # subsequent slice sample is exact so the chain remains ergodic.
+        # 5b) phi correction: shift phi by the first-order K-preserving amount
+        # Δθ·μ_old·tanh(φ/2)·mean_v, then re-sample phi from its exact
+        # conditional given the new mu.  Using Δθ (log-scale) rather than
+        # Δμ = μ_old·(exp(Δθ)-1) prevents exponentially large corrections
+        # from big theta jumps in early warmup that would strand the sampler.
         if self.cfg.use_phi_correction:
-            delta_mu = self.mu - mu_before
-            self.phi += delta_mu * float(np.tanh(0.5 * self.phi)) * self.mean_v
+            delta_theta = new_theta - theta_before
+            self.phi += delta_theta * mu_before * float(np.tanh(0.5 * self.phi)) * self.mean_v
             self.phi, _ = slice_sample_1d(
                 self.rng, self.phi, self.logpost_phi_given_rest,
                 w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
