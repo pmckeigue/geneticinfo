@@ -12,6 +12,12 @@ summarize_and_plot(result, ...)
     Print posterior summary statistics and produce a figure showing the prior,
     posterior, and likelihood for mu.
 
+plot_trace(result, outfile, title)
+    Full trace plot (warmup + sampling) for mu and log-likelihood.
+
+plot_pairs(result, outfile, title)
+    Pairs scatter-matrix plot of (mu, beta0, p, log-likelihood).
+
 compress(L, y, posterior_result, outfile)
     Save a privacy-preserving compressed model (block L matrices + posterior
     samples) to a .npz file for offline use.
@@ -851,6 +857,154 @@ def summarize_and_plot(
         "ess_bulk": ess,
         "r_hat": rhat,
     }
+
+
+# ── diagnostic plots ─────────────────────────────────────────────────────────
+
+def plot_trace(
+    result: dict,
+    outfile: str | None = None,
+    title: str = "",
+) -> None:
+    """
+    Full trace plot: warmup + sampling for mu and log-likelihood, one line per chain.
+
+    Warmup iterations are shown at alpha=0.4; sampling period at alpha=0.8.
+    A vertical dashed line marks the start of the sampling period.
+
+    Parameters
+    ----------
+    result  : dict returned by sample_posterior()
+    outfile : path to save PNG; if None, display interactively
+    title   : extra title text appended to the ESS/R-hat annotation
+    """
+    import arviz as az
+
+    chain_dicts = result["chain_dicts"]
+    cfg         = result["cfg"]
+    n_wu = cfg.n_warmup
+    n_sa = cfg.n_samples
+
+    mu_wu = np.vstack([d["mu_warmup"] for d in chain_dicts])   # (n_chains, n_wu)
+    ll_wu = np.vstack([d["ll_warmup"] for d in chain_dicts])   # (n_chains, n_wu)
+    mu_sa = np.vstack([d["mu"]        for d in chain_dicts])   # (n_chains, n_sa)
+    ll_sa = np.vstack([d["ll"]        for d in chain_dicts])   # (n_chains, n_sa)
+
+    az_data = az.convert_to_inference_data({"mu": mu_sa})
+    summ    = az.summary(az_data, var_names=["mu"])
+    ess  = float(summ["ess_bulk"].iloc[0])
+    rhat = float(summ["r_hat"].iloc[0])
+
+    iters_wu = np.arange(n_wu)
+    iters_sa = np.arange(n_wu, n_wu + n_sa)
+
+    fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
+    colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+    for c in range(mu_wu.shape[0]):
+        col = colors[c % len(colors)]
+        axes[0].plot(iters_wu, mu_wu[c], alpha=0.40, lw=0.7, color=col)
+        axes[0].plot(iters_sa, mu_sa[c], alpha=0.80, lw=0.8, color=col)
+        axes[1].plot(iters_wu, ll_wu[c], alpha=0.40, lw=0.7, color=col)
+        axes[1].plot(iters_sa, ll_sa[c], alpha=0.80, lw=0.8, color=col)
+    for ax in axes:
+        ax.axvline(n_wu, color="k", ls="--", lw=1.2, label=f"sampling start (iter {n_wu})")
+        ax.legend(fontsize=8)
+    axes[0].set_ylabel("mu")
+    axes[0].set_title(
+        f"{title}  n_warmup={n_wu}  n_samples={n_sa}  "
+        f"ESS={ess:.0f}  R-hat={rhat:.3f}"
+    )
+    axes[1].set_ylabel("log-likelihood")
+    axes[1].set_xlabel("iteration")
+    fig.tight_layout()
+
+    if outfile is not None:
+        fig.savefig(outfile, dpi=100, bbox_inches="tight")
+        print(f"  Trace plot saved: {outfile}")
+    else:
+        try:
+            from IPython.display import display as _ipy_display
+            _ipy_display(fig)
+        except ImportError:
+            plt.show()
+    plt.close(fig)
+
+
+def plot_pairs(
+    result: dict,
+    outfile: str | None = None,
+    title: str = "",
+) -> None:
+    """
+    Pairs (scatter matrix) plot of global parameters from the sampling period.
+
+    Variables: mu, beta0, p, ll (log-likelihood).
+    Diagonal: KDE density.  Off-diagonal: scatter coloured by chain.
+
+    Parameters
+    ----------
+    result  : dict returned by sample_posterior()
+    outfile : path to save PNG; if None, display interactively
+    title   : figure suptitle
+    """
+    chain_dicts = result["chain_dicts"]
+    n_chains    = len(chain_dicts)
+    colors      = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+
+    # Collect per-chain arrays; shape (n_chains, n_samples) each
+    mu_chains   = np.vstack([d["mu"]    for d in chain_dicts])
+    beta0_chains = np.vstack([d["beta0"] for d in chain_dicts])
+    p_chains    = np.vstack([d["p"]     for d in chain_dicts])
+    ll_chains   = np.vstack([d["ll"]    for d in chain_dicts])
+
+    var_names  = ["mu", "beta0", "p", "log-lik"]
+    data_all   = [
+        mu_chains.ravel(),
+        beta0_chains.ravel(),
+        p_chains.ravel(),
+        ll_chains.ravel(),
+    ]
+    chain_ids  = np.repeat(np.arange(n_chains), mu_chains.shape[1])
+    n_vars     = len(var_names)
+
+    fig, axes = plt.subplots(n_vars, n_vars, figsize=(10, 10))
+    for i in range(n_vars):
+        for j in range(n_vars):
+            ax = axes[i, j]
+            if i == j:
+                # Diagonal: KDE
+                x_all = data_all[i]
+                kde = gaussian_kde(x_all)
+                xg  = np.linspace(x_all.min(), x_all.max(), 200)
+                ax.plot(xg, kde(xg), color="steelblue", lw=1.5)
+                ax.set_yticks([])
+            else:
+                # Off-diagonal: scatter coloured by chain
+                for c in range(n_chains):
+                    mask = chain_ids == c
+                    ax.scatter(data_all[j][mask], data_all[i][mask],
+                               s=1.5, alpha=0.25, color=colors[c % len(colors)],
+                               rasterized=True)
+            if i == n_vars - 1:
+                ax.set_xlabel(var_names[j], fontsize=9)
+            if j == 0:
+                ax.set_ylabel(var_names[i], fontsize=9)
+            ax.tick_params(labelsize=7)
+
+    if title:
+        fig.suptitle(title, fontsize=11)
+    fig.tight_layout()
+
+    if outfile is not None:
+        fig.savefig(outfile, dpi=120, bbox_inches="tight")
+        print(f"  Pairs plot saved: {outfile}")
+    else:
+        try:
+            from IPython.display import display as _ipy_display
+            _ipy_display(fig)
+        except ImportError:
+            plt.show()
+    plt.close(fig)
 
 
 # ── compression / synthetic generation ───────────────────────────────────────

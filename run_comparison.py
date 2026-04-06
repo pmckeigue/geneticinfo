@@ -1,33 +1,33 @@
 """
-Run both DiscreteHMCGibbs and PG-Gibbs on the same case-control dataset
-simulated from a population with full-sib pairs, full-sib triplets, and
-half-sib pairs.  True mu = 1.0, K = 0.01.
+Compare PG-Gibbs (baseline vs use_phi_correction) and optionally DiscreteHMCGibbs
+on the same simulated case-control dataset.
 
-DiscreteHMCGibbs (JAX/NumPyro, GPU):
-  - Operates on M_rel individuals in relative-only blocks (all sizes >= 2)
-  - Fits lr_discrete_blockdiag; 4 chains, 2000 warmup + 2000 samples
+True mu = 2.0, K = 0.01.  Simulated pedigree: full-sib pairs, full-sib triplets,
+half-sib pairs, and unrelated individuals.
 
-PG-Gibbs (NumPy, CPU):
-  - Operates on full case-control sample; excludes singletons from mu update
-  - 4 chains via fork, 1000 warmup + 5000 samples
+Set RUN_HMC = True to also run DiscreteHMCGibbs (requires 4 GPUs).
 """
+from __future__ import annotations
+
 import os
 os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.15"
 
 import time
-import multiprocessing as mp
 import numpy as np
-import arviz as az
-from tqdm import tqdm
+import matplotlib
+matplotlib.use("Agg")
+
+# ── flags ────────────────────────────────────────────────────────────────────
+RUN_HMC = False   # set True to also run DiscreteHMCGibbs (requires 4 GPUs)
 
 # ── simulation parameters ────────────────────────────────────────────────────
-MU_TRUE          = 2.0
-K                = 0.01
-SEED_DATA        = 42
-N_FULLSIB_PAIRS  = 400_000
-N_FULLSIB_TRIPS  = 200_000
-N_HALFSIB_PAIRS  = 40_000
-N_UNRELATED      = 4_000
+MU_TRUE         = 2.0
+K               = 0.01
+SEED_DATA       = 42
+N_FULLSIB_PAIRS = 400_000
+N_FULLSIB_TRIPS = 200_000
+N_HALFSIB_PAIRS =  40_000
+N_UNRELATED     =   4_000
 
 # ── 1. Simulate once ─────────────────────────────────────────────────────────
 print("=" * 60)
@@ -45,10 +45,9 @@ y_sample, A_sample, L_sample, info, g_sample = simulate_casecontrol_related(
 print_casecontrol_summary(info)
 M = info["M"]
 
-# ── 2. Build shared block structure ──────────────────────────────────────────
-from polyagamma_gibbs import infer_blocks_from_L, BlockStructure, ChainConfig
-from pg_gibbs_vectorized import GroupedBlocks, _worker_preloaded
-from pg_gibbs_clean import _worker_preloaded_scratch, _worker_preloaded_lrpg
+# ── 2. Build block structure ──────────────────────────────────────────────────
+from polyagamma_gibbs import infer_blocks_from_L, BlockStructure
+from pg_gibbs_vectorized import GroupedBlocks
 
 L_np = np.asarray(L_sample, dtype=np.float64)
 y_np = np.asarray(y_sample, dtype=np.float64)
@@ -67,14 +66,12 @@ n3 = gb.L_by_size[3].shape[0] if 3 in gb.L_by_size else 0
 M_rel = sum(gb.L_by_size[s].shape[0] * s for s in gb.sizes if s >= 2)
 print(f"  Related (size>=2): {M_rel}  ({n2} pairs, {n3} triplets)")
 
-# Build a relatives-only GroupedBlocks (singletons discarded entirely).
-# Blocks are re-indexed 0..M_rel-1 in size-descending order so that the
-# PG-Gibbs sampler sees the same M_rel individuals as DiscreteHMCGibbs.
+# Relatives-only GroupedBlocks (singletons discarded)
 rel_sizes = sorted([s for s in gb.sizes if s >= 2], reverse=True)
 rel_idx_ordered = np.concatenate([gb.idx_by_size[s] for s in rel_sizes])
 y_rel = y_perm[rel_idx_ordered]
 
-new_L_by_size   = {}
+new_L_by_size  = {}
 new_idx_by_size = {}
 offset = 0
 for s in rel_sizes:
@@ -92,244 +89,147 @@ gb_rel = GroupedBlocks(
 print(f"  Relatives-only GroupedBlocks: M={gb_rel.M}  "
       + "  ".join(f"size-{s}:{gb_rel.L_by_size[s].shape[0]}" for s in gb_rel.sizes))
 
-
+# Dense block-diagonal L for relatives only (input to sample_posterior)
 def dense_from_groupedblocks(gb) -> np.ndarray:
     L = np.zeros((gb.M, gb.M), dtype=np.float64)
     for s in gb.sizes:
-        Ls = gb.L_by_size[s]                            # (n_s,s,s)
-        idx = gb.idx_by_size[s].reshape(-1, s)          # (n_s,s)
+        Ls  = gb.L_by_size[s]
+        idx = gb.idx_by_size[s].reshape(-1, s)
         for b in range(Ls.shape[0]):
             sl = idx[b]
             L[np.ix_(sl, sl)] = Ls[b]
     return L
 
-# Build block object used by scratch sampler
-from pg_gibbs_clean import blockdiag_from_groupedblocks
-Lblk_rel = blockdiag_from_groupedblocks(gb_rel)
+L_rel = dense_from_groupedblocks(gb_rel)
 
-# Dense matrix for checking
-L_dense_rel = dense_from_groupedblocks(gb_rel)
-
-rng_check = np.random.default_rng(0)
-v = rng_check.normal(size=gb_rel.M)
-
-err = np.max(np.abs(L_dense_rel.T @ v - Lblk_rel.Lt_vec(v)))
-print("Lt_vec max abs err (relatives):", err)
-assert err < 1e-10
-
-
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# ALGORITHM 1: PG-Gibbs  (M_rel relatives only; β₀ marginalised in θ update)
-# ═══════════════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("PG-Gibbs  (4 chains × 5000 samples, 1000 warmup, M_rel relatives only)")
-print("=" * 60)
-
-# Match DiscreteHMCGibbs model:
-#   - p ~ Beta(10,10) → logit(p) ≈ N(0, σ) with σ ≈ sqrt(1/(0.25*21)) ≈ 0.436
-#   - p_prior_conc = 20 → Beta(10, 10) with prior centred at p_obs = 0.5
-#   - collapse_beta0=True: β₀ marginalised analytically in θ log-posterior
-BETA0_SD_REL = float(np.sqrt(1.0 / (0.25 * 21.0)))   # ≈ 0.436
-
-NUM_CHAINS_PG = 4
-cfg_pg = ChainConfig(
-    n_warmup=1000, n_samples=5000,
-    prior_loc=0.0, prior_scale=1.0,
-    beta0_sd=BETA0_SD_REL, slice_w=1.5, slice_m=20, slice_max_steps=250,
-    inner_latent_cycles=2, learn_p=True, p_prior_conc=20.0,
-    project_affects_beta0=False, diag_every=200, data_flag=True,
+# ── 3. PG-Gibbs: baseline and use_phi_correction ─────────────────────────────
+from geneticinfo import (
+    build_blocks, sample_posterior, summarize_and_plot, plot_trace, plot_pairs
 )
-# Use gb_rel (M_rel relatives only) with p0_override=p_obs (full-sample case
-# rate) to centre the Beta prior at 0.5, and collapse_beta0=True to
-# marginalise β₀ analytically in the θ log-posterior.
-p_obs_full = float(np.mean(y_sample))
-jobs_pg = [(cid, gb_rel, y_rel, 42 + cid, cfg_pg, MU_TRUE,
-            p_obs_full, False, False)   # p0_override, fix_beta0_to_pmix, collapse_beta0
-           for cid in range(NUM_CHAINS_PG)]
 
-t0_pg = time.perf_counter()
-ctx  = mp.get_context("fork")
-lock = ctx.RLock()
-with ctx.Pool(processes=NUM_CHAINS_PG,
-              initializer=tqdm.set_lock, initargs=(lock,)) as pool:
-    chains_pg = pool.map(_worker_preloaded_lrpg, jobs_pg)
-t_pg = time.perf_counter() - t0_pg
+COMMON = dict(
+    n_warmup       = 1000,
+    n_samples      = 5000,
+    n_chains       = 4,
+    n_blas_threads = 1,
+    mu_prior_df    = 30.0,
+    mu_prior_scale = 1.0,
+)
 
-mu_pg = np.concatenate([o["mu"] for o in chains_pg])
-az_pg = az.convert_to_inference_data(
-    {"mu": np.stack([o["mu"] for o in chains_pg])})
-summ_pg   = az.summary(az_pg, var_names=["mu"])
-ess_pg    = float(summ_pg["ess_bulk"].iloc[0])
-rhat_pg   = float(summ_pg["r_hat"].iloc[0])
-ci90_pg   = (float(np.percentile(mu_pg, 5)), float(np.percentile(mu_pg, 95)))
+results_pg = {}
+for label, use_phi_correction in [("baseline", False), ("phi_correction", True)]:
+    print(f"\n{'=' * 60}")
+    print(f"PG-Gibbs  ({label})  4 chains × 5000 samples, 1000 warmup")
+    print("=" * 60)
+    t0 = time.perf_counter()
+    results_pg[label] = sample_posterior(
+        L_rel, y_rel,
+        **COMMON,
+        use_phi_correction=use_phi_correction,
+    )
+    results_pg[label]["_wall"] = time.perf_counter() - t0
 
-print(f"\nPG-Gibbs results:")
-print(f"  Wall time:    {t_pg:.1f} s")
-print(f"  M_rel = {M_rel} ({n2} pairs + {n3} triplets; β₀ marginalised in θ update)")
-print(f"  mu: mean={mu_pg.mean():.3f}  median={np.median(mu_pg):.3f}  "
-      f"sd={mu_pg.std():.3f}  90%CI=[{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]")
-print(f"  ESS_bulk={ess_pg:.0f}  r_hat={rhat_pg:.3f}")
+    r = results_pg[label]
+    mu_all = r["mu_all"]
+    print(f"  Wall time: {r['_wall']:.1f} s")
+    print(f"  mu: mean={mu_all.mean():.3f}  median={np.median(mu_all):.3f}  "
+          f"sd={mu_all.std():.3f}  "
+          f"90%CI=[{np.percentile(mu_all,5):.3f},{np.percentile(mu_all,95):.3f}]")
 
+# ── 4. Plots for each PG-Gibbs condition ─────────────────────────────────────
+for label, r in results_pg.items():
+    mu_all = r["mu_all"]
+    summarize_and_plot(
+        r, outfile=f"comparison_posterior_{label}.png",
+        mu_true=MU_TRUE,
+    )
+    plot_trace(
+        r, outfile=f"comparison_trace_{label}.png",
+        title=f"PG-Gibbs {label}  (simulated data, true μ={MU_TRUE})",
+    )
+    plot_pairs(
+        r, outfile=f"comparison_pairs_{label}.png",
+        title=f"PG-Gibbs {label}  (simulated data, true μ={MU_TRUE})",
+    )
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# ALGORITHM 2: DiscreteHMCGibbs
-# ═══════════════════════════════════════════════════════════════════════════════
-print("\n" + "=" * 60)
-print("DiscreteHMCGibbs  (4 chains × 2000 samples, 2000 warmup)")
-print("=" * 60)
+# ── 5. Optional: DiscreteHMCGibbs ────────────────────────────────────────────
+if RUN_HMC:
+    print("\n" + "=" * 60)
+    print("DiscreteHMCGibbs  (4 chains × 2000 samples, 2000 warmup)")
+    print("=" * 60)
 
-import jax
-jax.config.update("jax_enable_x64", True)
-import jax.numpy as jnp
-from jax import random
-import numpyro
-from numpyro.infer import MCMC, NUTS, DiscreteHMCGibbs
-from geneticinfo_functions import lr_discrete_blockdiag
+    import jax
+    jax.config.update("jax_enable_x64", True)
+    import jax.numpy as jnp
+    from jax import random
+    import numpyro
+    from numpyro.infer import MCMC, NUTS, DiscreteHMCGibbs
+    import arviz as az
+    from geneticinfo_functions import lr_discrete_blockdiag
 
-NUM_CHAINS_HMC = 4
-numpyro.set_host_device_count(NUM_CHAINS_HMC)
+    NUM_CHAINS_HMC = 4
+    numpyro.set_host_device_count(NUM_CHAINS_HMC)
 
-# Build per-size block lists for lr_discrete_blockdiag.
-# Order: largest blocks first (size-3 before size-2) so individuals are
-# laid out consistently with gb_rel.
-assert n2 > 0, "No size-2 blocks found"
-p_obs = float(np.mean(y_sample))
+    hmc_sizes  = []
+    hmc_L_list = []
+    hmc_y_list = []
+    for s in sorted(gb.sizes, reverse=True):
+        if s < 2:
+            continue
+        hmc_sizes.append(s)
+        hmc_L_list.append(jnp.array(gb.L_by_size[s], dtype=jnp.float64))
+        hmc_y_list.append(jnp.array(y_perm[gb.idx_by_size[s]], dtype=jnp.float64))
 
-hmc_sizes  = []
-hmc_L_list = []
-hmc_y_list = []
-for s in sorted(gb.sizes, reverse=True):
-    if s < 2:
-        continue
-    hmc_sizes.append(s)
-    hmc_L_list.append(jnp.array(gb.L_by_size[s], dtype=jnp.float64))
-    hmc_y_list.append(jnp.array(y_perm[gb.idx_by_size[s]], dtype=jnp.float64))
+    p_obs  = float(np.mean(y_sample))
+    M_hmc  = sum(L.shape[0] * s for L, s in zip(hmc_L_list, hmc_sizes))
+    inner_kernel = NUTS(lr_discrete_blockdiag, max_tree_depth=8)
+    kernel = DiscreteHMCGibbs(inner_kernel, modified=True)
+    mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
+                num_chains=NUM_CHAINS_HMC, chain_method="parallel",
+                progress_bar=True)
 
-M_hmc = sum(L.shape[0] * s for L, s in zip(hmc_L_list, hmc_sizes))
-size_str = "  ".join(f"{L.shape[0]} size-{s}" for L, s in zip(hmc_L_list, hmc_sizes))
-print(f"  Using M_rel={M_hmc}: {size_str}")
+    t0_hmc = time.perf_counter()
+    mcmc.run(random.PRNGKey(0),
+             L_list=hmc_L_list, y_list=hmc_y_list, sizes=hmc_sizes, p_obs=p_obs)
+    t_hmc = time.perf_counter() - t0_hmc
 
-inner_kernel = NUTS(lr_discrete_blockdiag, max_tree_depth=8)
-kernel = DiscreteHMCGibbs(inner_kernel, modified=True)
-mcmc = MCMC(kernel, num_warmup=2000, num_samples=2000,
-            num_chains=NUM_CHAINS_HMC, chain_method="parallel",
-            progress_bar=True)
+    mu_hmc   = np.array(mcmc.get_samples()["mu"])
+    az_hmc   = az.convert_to_inference_data({"mu": mu_hmc.reshape(NUM_CHAINS_HMC, -1)})
+    summ_hmc = az.summary(az_hmc, var_names=["mu"])
+    ess_hmc  = float(summ_hmc["ess_bulk"].iloc[0])
+    rhat_hmc = float(summ_hmc["r_hat"].iloc[0])
+    ci90_hmc = (float(np.percentile(mu_hmc, 5)), float(np.percentile(mu_hmc, 95)))
 
-t0_hmc = time.perf_counter()
-mcmc.run(random.PRNGKey(0),
-         L_list=hmc_L_list, y_list=hmc_y_list, sizes=hmc_sizes, p_obs=p_obs)
-t_hmc = time.perf_counter() - t0_hmc
+    print(f"\nDiscreteHMCGibbs results:")
+    print(f"  Wall time: {t_hmc:.1f} s")
+    print(f"  mu: mean={mu_hmc.mean():.3f}  median={float(np.median(mu_hmc)):.3f}  "
+          f"sd={mu_hmc.std():.3f}  90%CI=[{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]")
+    print(f"  ESS_bulk={ess_hmc:.0f}  r_hat={rhat_hmc:.3f}")
 
-samples_hmc = mcmc.get_samples()
-mu_hmc = np.array(samples_hmc["mu"])
-az_hmc = az.convert_to_inference_data(
-    {"mu": mu_hmc.reshape(NUM_CHAINS_HMC, -1)})
-summ_hmc  = az.summary(az_hmc, var_names=["mu"])
-ess_hmc   = float(summ_hmc["ess_bulk"].iloc[0])
-rhat_hmc  = float(summ_hmc["r_hat"].iloc[0])
-ci90_hmc  = (float(np.percentile(mu_hmc, 5)), float(np.percentile(mu_hmc, 95)))
-
-print(f"\nDiscreteHMCGibbs results:")
-print(f"  Wall time:    {t_hmc:.1f} s")
-print(f"  M_rel = {M_hmc} ({size_str})")
-print(f"  mu: mean={mu_hmc.mean():.3f}  median={float(np.median(mu_hmc)):.3f}  "
-      f"sd={mu_hmc.std():.3f}  90%CI=[{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]")
-print(f"  ESS_bulk={ess_hmc:.0f}  r_hat={rhat_hmc:.3f}")
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# COMPARISON SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════════
+# ── 6. Comparison table ───────────────────────────────────────────────────────
 print("\n" + "=" * 60)
 print("COMPARISON SUMMARY")
 print(f"  True mu = {MU_TRUE}   K = {K}   M = {M:,}   seed = {SEED_DATA}")
 print("=" * 60)
-print(f"  {'Algorithm':<22}  {'median':>7}  {'sd':>6}  {'90% CI':>18}  "
+print(f"  {'Algorithm':<28}  {'median':>7}  {'sd':>6}  {'90% CI':>18}  "
       f"{'ESS':>6}  {'r_hat':>6}  {'wall':>8}")
-print(f"  {'PG-Gibbs':<22}  {np.median(mu_pg):>7.3f}  {mu_pg.std():>6.3f}  "
-      f"  [{ci90_pg[0]:.3f},{ci90_pg[1]:.3f}]  "
-      f"{ess_pg:>6.0f}  {rhat_pg:>6.3f}  {t_pg:>7.1f}s")
-print(f"  {'DiscreteHMCGibbs':<22}  {float(np.median(mu_hmc)):>7.3f}  {mu_hmc.std():>6.3f}  "
-      f"  [{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]  "
-      f"{ess_hmc:>6.0f}  {rhat_hmc:>6.3f}  {t_hmc:>7.1f}s")
 
+import arviz as az
+for label, r in results_pg.items():
+    mu_all  = r["mu_all"]
+    mu_mat  = np.vstack([d["mu"] for d in r["chain_dicts"]])
+    az_data = az.convert_to_inference_data({"mu": mu_mat})
+    summ    = az.summary(az_data, var_names=["mu"])
+    ess     = float(summ["ess_bulk"].iloc[0])
+    rhat    = float(summ["r_hat"].iloc[0])
+    ci90    = (float(np.percentile(mu_all, 5)), float(np.percentile(mu_all, 95)))
+    wall    = r["_wall"]
+    name    = f"PG-Gibbs ({label})"
+    print(f"  {name:<28}  {np.median(mu_all):>7.3f}  {mu_all.std():>6.3f}  "
+          f"  [{ci90[0]:.3f},{ci90[1]:.3f}]  "
+          f"{ess:>6.0f}  {rhat:>6.3f}  {wall:>7.1f}s")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PLOTS: prior / posterior / likelihood for each algorithm
-# ═══════════════════════════════════════════════════════════════════════════════
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from scipy.stats import gaussian_kde
-
-PRIOR_SCALE = 1.0   # half-Cauchy scale used by both samplers
-
-def halfcauchy_pdf(x, scale=PRIOR_SCALE):
-    return 2.0 / (np.pi * scale * (1.0 + (x / scale) ** 2))
-
-def make_likelihood(samples):
-    """Estimate likelihood as posterior / prior (importance-weight KDE)."""
-    prior_vals = np.maximum(halfcauchy_pdf(samples), 1e-300)
-    w = 1.0 / prior_vals
-    w /= w.sum()
-    kde = gaussian_kde(samples, weights=w)
-    return kde
-
-fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=False)
-
-for ax, samples, label, wall, m_rel_used, n_samples_str, color_post in [
-    (axes[0], mu_pg,  "PG-Gibbs",
-     t_pg,  f"M_rel={M_rel} ({n2} pairs + {n3} triplets; β₀ collapsed)",
-     f"4 chains × 5,000 samples", "steelblue"),
-    (axes[1], mu_hmc, "DiscreteHMCGibbs",
-     t_hmc, f"M_rel={M_hmc} ({n2} pairs + {n3} triplets)",
-     f"4 chains × 2,000 samples", "darkorange"),
-]:
-    mu_max  = max(4.0, float(np.percentile(samples, 99)) * 1.6)
-    mu_grid = np.linspace(1e-4, mu_max, 600)
-
-    prior_d = halfcauchy_pdf(mu_grid)
-    post_d  = gaussian_kde(samples)(mu_grid)
-    lik_d   = make_likelihood(samples)(mu_grid)
-    lik_d  /= np.trapezoid(lik_d, mu_grid)
-
-    ax.plot(mu_grid, prior_d, color="gray",  lw=1.8, ls="--",
-            label=f"Prior  [half-Cauchy(scale={PRIOR_SCALE:.0f})]")
-    ax.plot(mu_grid, post_d,  color=color_post, lw=2.2,
-            label="Posterior")
-    ax.plot(mu_grid, lik_d,   color="firebrick", lw=2.0, ls="-.",
-            label="Likelihood  (posterior / prior)")
-    ax.axvline(MU_TRUE, color="black", ls=":", lw=1.5,
-               label=f"True μ = {MU_TRUE:.1f}")
-
-    med = float(np.median(samples))
-    ci5, ci95 = float(np.percentile(samples, 5)), float(np.percentile(samples, 95))
-    ess = ess_pg if "PG" in label else ess_hmc
-    rhat = rhat_pg if "PG" in label else rhat_hmc
-
-    ax.set_xlabel("μ  (genetic information, nats)", fontsize=12)
-    ax.set_ylabel("Density", fontsize=12)
-    ax.set_title(
-        f"{label}\n"
-        f"{n_samples_str}   M_rel = {m_rel_used}\n"
-        f"median={med:.3f}   90% CI=[{ci5:.3f}, {ci95:.3f}]",
-        fontsize=10,
-    )
-    ax.text(0.97, 0.95,
-            f"ESS = {ess:.0f}\n$\\hat{{R}}$ = {rhat:.3f}\nwall = {wall:.0f} s",
-            transform=ax.transAxes, ha="right", va="top", fontsize=9,
-            bbox=dict(boxstyle="round,pad=0.3", fc="white", alpha=0.85))
-    ax.legend(fontsize=9)
-    ax.set_xlim(0, mu_max)
-    ax.set_ylim(bottom=0)
-
-fig.suptitle(
-    f"Prior, posterior, and likelihood for μ\n"
-    f"Same dataset: M={M:,}   K={K}   true μ={MU_TRUE}   seed={SEED_DATA}",
-    fontsize=11, y=1.01,
-)
-fig.tight_layout()
-fig.savefig("comparison_prior_posterior_likelihood.png", dpi=150, bbox_inches="tight")
-print("\nPlot saved: comparison_prior_posterior_likelihood.png")
+if RUN_HMC:
+    print(f"  {'DiscreteHMCGibbs':<28}  {float(np.median(mu_hmc)):>7.3f}  {mu_hmc.std():>6.3f}  "
+          f"  [{ci90_hmc[0]:.3f},{ci90_hmc[1]:.3f}]  "
+          f"{ess_hmc:>6.0f}  {rhat_hmc:>6.3f}  {t_hmc:>7.1f}s")

@@ -42,7 +42,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from geneticinfo import build_blocks, sample_posterior, summarize_and_plot
+from geneticinfo import build_blocks, sample_posterior, summarize_and_plot, plot_trace
 
 RA_data = np.load("RA_data.npz")
 L = RA_data["L"]
@@ -165,44 +165,9 @@ np.savez_compressed(
 )
 print(f"Results saved to {results_file}")
 
-# Full trace plot: warmup + sampling, mu and log-likelihood, one line per chain.
-# Warmup iterations are shown with lower alpha; sampling starts at n_warmup.
 trace_file = f"trace_{PHENO}_{suffix}.png"
-n_wu = result["cfg"].n_warmup
-n_sa = result["cfg"].n_samples
-mu_wu  = np.vstack([d["mu_warmup"] for d in result["chain_dicts"]])  # (n_chains, n_wu)
-ll_wu  = np.vstack([d["ll_warmup"] for d in result["chain_dicts"]])  # (n_chains, n_wu)
-mu_sa  = np.vstack([d["mu"]        for d in result["chain_dicts"]])  # (n_chains, n_sa)
-ll_sa  = np.vstack([d["ll"]        for d in result["chain_dicts"]])  # (n_chains, n_sa)
-iters_wu = np.arange(n_wu)
-iters_sa = np.arange(n_wu, n_wu + n_sa)
-
-fig, axes = plt.subplots(2, 1, figsize=(14, 7), sharex=True)
-colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
-for c in range(mu_wu.shape[0]):
-    col = colors[c % len(colors)]
-    axes[0].plot(iters_wu, mu_wu[c], alpha=0.40, lw=0.7, color=col)
-    axes[0].plot(iters_sa, mu_sa[c], alpha=0.80, lw=0.8, color=col)
-    axes[1].plot(iters_wu, ll_wu[c], alpha=0.40, lw=0.7, color=col)
-    axes[1].plot(iters_sa, ll_sa[c], alpha=0.80, lw=0.8, color=col)
-for ax in axes:
-    ax.axvline(n_wu, color="k", ls="--", lw=1.2, label=f"sampling start (iter {n_wu})")
-    if n_warmup_phase1 > 0 and n_warmup_phase1 < n_wu:
-        ax.axvline(n_warmup_phase1, color="grey", ls=":", lw=1,
-                   label=f"adaptation start (iter {n_warmup_phase1})")
-axes[0].set_ylabel("mu")
-axes[0].set_title(
-    f"Full trace — {PHENO}  {suffix}  "
-    f"(n_warmup={n_wu}, n_samples={n_sa})  "
-    f"ESS={summary['ess_bulk']:.0f}  R-hat={summary['r_hat']:.3f}"
-)
-axes[0].legend(fontsize=8)
-axes[1].set_ylabel("log-likelihood")
-axes[1].set_xlabel("iteration")
-plt.tight_layout()
-plt.savefig(trace_file, dpi=100)
-plt.close()
-print(f"Full trace saved to {trace_file}")
+plot_trace(result, outfile=trace_file,
+           title=f"{PHENO}  {suffix}")
 
 # Remove all files except outputs so dxjupyterlab does not upload
 # the cloned repo, input data, and setup files to the project file store.
