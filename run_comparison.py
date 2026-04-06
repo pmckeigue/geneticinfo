@@ -102,7 +102,7 @@ def dense_from_groupedblocks(gb) -> np.ndarray:
 
 L_rel = dense_from_groupedblocks(gb_rel)
 
-# ── 3. PG-Gibbs: baseline and use_phi_correction ─────────────────────────────
+# ── 3. PG-Gibbs: four conditions ─────────────────────────────────────────────
 from geneticinfo import (
     build_blocks, sample_posterior, summarize_and_plot, plot_trace, plot_pairs
 )
@@ -116,8 +116,15 @@ COMMON = dict(
     mu_prior_scale = 1.0,
 )
 
+CONDITIONS = [
+    # (label,              use_phi_correction, use_asis)
+    ("baseline",           False,              False),
+    ("phi_correction",     True,               False),
+    ("asis",               True,               True),
+]
+
 results_pg = {}
-for label, use_phi_correction in [("baseline", False), ("phi_correction", True)]:
+for label, use_phi_correction, use_asis in CONDITIONS:
     print(f"\n{'=' * 60}")
     print(f"PG-Gibbs  ({label})  4 chains × 5000 samples, 1000 warmup")
     print("=" * 60)
@@ -126,6 +133,7 @@ for label, use_phi_correction in [("baseline", False), ("phi_correction", True)]
         L_rel, y_rel,
         **COMMON,
         use_phi_correction=use_phi_correction,
+        use_asis=use_asis,
     )
     results_pg[label]["_wall"] = time.perf_counter() - t0
 
