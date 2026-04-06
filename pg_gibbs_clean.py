@@ -1157,7 +1157,11 @@ class LRDiscreteBlockdiagPGGibbs:
         # logpdf(L) < y and logpdf(R) < y.
         if self.cfg.use_phi_correction:
             delta_theta = new_theta - theta_before
-            self.phi += delta_theta * mu_before * float(np.tanh(0.5 * self.phi)) * self.mean_v
+            phi_corrected = (self.phi
+                             + delta_theta * mu_before
+                             * float(np.tanh(0.5 * self.phi)) * self.mean_v)
+            if np.isfinite(self.logpost_phi_given_rest(phi_corrected)):
+                self.phi = phi_corrected
             self.phi, _ = slice_sample_1d(
                 self.rng, self.phi, self.logpost_phi_given_rest,
                 w=self.cfg.slice_w_phi, m=500,
@@ -1192,6 +1196,8 @@ class LRDiscreteBlockdiagPGGibbs:
 
         def lp_nc(theta_nc: float) -> float:
             if theta_nc < -745.0 or theta_nc > 709.0:
+                return -np.inf
+            if abs(theta_nc - self.theta) > 15.0:
                 return -np.inf
             mu_nc = float(np.exp(theta_nc))
             eta = self.phi + mu_nc * a + np.sqrt(2.0 * mu_nc) * b
