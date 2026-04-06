@@ -401,11 +401,18 @@ def _worker_with_queue(args):
 
         if jags_adapt and i >= n_warmup_phase1:
             sumdiff_theta += n_adapt * abs(sampler.theta - theta_old)
-            sumdiff_phi   += n_adapt * abs(sampler.phi   - phi_old)
+            # When use_phi_correction is active the recorded phi displacement
+            # includes a large deterministic correction term that is unrelated
+            # to the intrinsic slice width; adapting phi width on that signal
+            # inflates slice_w_phi to nonsensical values.  Skip phi adaptation
+            # in that case and keep slice_w_phi at its initial value.
+            if not use_phi_correction:
+                sumdiff_phi += n_adapt * abs(sampler.phi - phi_old)
             n_adapt += 1
             if n_adapt > _JAGS_MIN_ADAPT:
                 lr_cfg.slice_w_theta = 2.0 * sumdiff_theta / n_adapt / (n_adapt - 1)
-                lr_cfg.slice_w_phi   = 2.0 * sumdiff_phi   / n_adapt / (n_adapt - 1)
+                if not use_phi_correction:
+                    lr_cfg.slice_w_phi = 2.0 * sumdiff_phi / n_adapt / (n_adapt - 1)
 
         if (i + 1) % UPDATE_EVERY == 0 or i == n_w - 1:
             delta = (i + 1) - last
