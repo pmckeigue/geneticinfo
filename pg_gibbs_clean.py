@@ -1149,13 +1149,18 @@ class LRDiscreteBlockdiagPGGibbs:
         # Δθ·μ_old·tanh(φ/2)·mean_v, then re-sample phi from its exact
         # conditional given the new mu.  Using Δθ (log-scale) rather than
         # Δμ = μ_old·(exp(Δθ)-1) prevents exponentially large corrections
-        # from big theta jumps in early warmup that would strand the sampler.
+        # from big theta jumps in early warmup.
+        # The re-slice uses m=500 (range = 500·w) to handle corrections that
+        # exceed the normal stepping-out range (e.g. when mu is temporarily
+        # elevated during warmup).  The extra stepping-out cost is negligible
+        # at stationarity because the procedure terminates as soon as
+        # logpdf(L) < y and logpdf(R) < y.
         if self.cfg.use_phi_correction:
             delta_theta = new_theta - theta_before
             self.phi += delta_theta * mu_before * float(np.tanh(0.5 * self.phi)) * self.mean_v
             self.phi, _ = slice_sample_1d(
                 self.rng, self.phi, self.logpost_phi_given_rest,
-                w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+                w=self.cfg.slice_w_phi, m=500,
             )
 
         # 6) Refresh Zmix once more under the new mu (optional but usually helps)
