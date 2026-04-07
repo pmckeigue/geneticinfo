@@ -282,7 +282,7 @@ def _make_chain_config(
     n_samples: int,
     mu_prior_scale: float,
     p_prior_conc: float,
-    mu_prior_df: float = 10.0,
+    mu_prior_df: float = 1.0,
     slice_w: float = 1.5,
 ) -> ChainConfig:
     return ChainConfig(
@@ -533,7 +533,7 @@ def sample_posterior(
     progress_bar: bool = True,
     corr_threshold: float = 0.0,
     n_blas_threads: int | None = None,
-    mu_prior_df: float = 10.0,
+    mu_prior_df: float = 1.0,
     slice_w: float = 1.5,
     jags_adapt: bool = False,
     n_warmup_phase1: int = 0,

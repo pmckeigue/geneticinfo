@@ -934,7 +934,7 @@ class LRBlockdiagPGConfig:
     K_beta: float = 20.0                # same "K=20" as your numpyro model
     p_obs: float = 0.5                  # prior centre (full-sample observed case fraction)
     mu_prior_scale: float = 1.0         # half-Student-t scale
-    mu_prior_df: float = 10.0          # degrees of freedom (df=1 → half-Cauchy)
+    mu_prior_df: float = 1.0           # degrees of freedom (df=1 → half-Cauchy)
 
     # slice sampling settings
     slice_w_phi: float = 1.0
@@ -952,7 +952,7 @@ class LRBlockdiagPGConfig:
 
     # collapsed phi update: integrate out Zmix for the phi slice too,
     # reusing the same eigendecomposition as the theta (mu) update.
-    use_collapsed_phi: bool = False
+    use_collapsed_phi: bool = True
 
     # auxiliary variable expansion for heavy-tailed prior on mu:
     # replaces HalfCauchy (or low-df Student-t) with a scale mixture of
@@ -1248,9 +1248,13 @@ class LRDiscreteBlockdiagPGGibbs:
             mu_nc = float(np.exp(theta_nc))
             eta = self.phi + mu_nc * a + np.sqrt(2.0 * mu_nc) * b
             ll_aug = float(np.dot(self.kappa, eta) - 0.5 * np.dot(self.omega, eta * eta))
-            s  = float(self.cfg.mu_prior_scale)
-            df = float(self.cfg.mu_prior_df)
-            return ll_aug + theta_nc - 0.5 * (df + 1.0) * np.log(1.0 + (mu_nc / s) ** 2 / df)
+            if self.cfg.use_cauchy_aux:
+                lp_prior = theta_nc - mu_nc ** 2 / (2.0 * self.cfg.aux_v)
+            else:
+                s  = float(self.cfg.mu_prior_scale)
+                df = float(self.cfg.mu_prior_df)
+                lp_prior = theta_nc - 0.5 * (df + 1.0) * np.log(1.0 + (mu_nc / s) ** 2 / df)
+            return ll_aug + lp_prior
 
         new_theta, n_shrink = slice_sample_1d(
             self.rng, self.theta, lp_nc,
