@@ -103,7 +103,8 @@ result_pg = sample_posterior(
     mu_prior_scale=1.0,
     mu_prior_df=1.0,          # half-Cauchy — same prior as DiscreteHMCGibbs
     use_collapsed_phi=True,
-    jags_adapt=True,          # adapt slice widths during warmup (needed for heavy-tailed prior)
+    use_cauchy_aux=True,      # scale-mixture auxiliary variable for heavy-tailed prior
+    jags_adapt=True,          # also adapt slice widths during warmup
     n_warmup_phase1=300,      # 300 fixed-width iterations before adaptation starts
 )
 t_pg = time.perf_counter() - t0

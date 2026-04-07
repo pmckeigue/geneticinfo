@@ -954,6 +954,13 @@ class LRBlockdiagPGConfig:
     # reusing the same eigendecomposition as the theta (mu) update.
     use_collapsed_phi: bool = False
 
+    # auxiliary variable expansion for heavy-tailed prior on mu:
+    # replaces HalfCauchy (or low-df Student-t) with a scale mixture of
+    # HalfNormals.  Enabled automatically when mu_prior_df < 10.
+    # aux_v is the current auxiliary variance (updated each iteration).
+    use_cauchy_aux: bool = False
+    aux_v: float = 1.0
+
 
 class LRDiscreteBlockdiagPGGibbs:
     """
@@ -1133,8 +1140,9 @@ class LRDiscreteBlockdiagPGGibbs:
             mu_cache = update_cache_for_new_phi(mu_cache, self.phi)
 
             # 5) theta | omega, r  (collapsed over Zmix)
+            _aux_v = self.cfg.aux_v if self.cfg.use_cauchy_aux else 0.0
             def lp_theta_col(th: float) -> float:
-                return logpost_theta_mu_collapsed(th, mu_cache)
+                return logpost_theta_mu_collapsed(th, mu_cache, aux_v=_aux_v)
             new_theta, n_shrink = slice_sample_1d(
                 self.rng, self.theta, lp_theta_col,
                 w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta,
@@ -1172,8 +1180,13 @@ class LRDiscreteBlockdiagPGGibbs:
                 mu_prior_df=self.cfg.mu_prior_df,
             )
 
+            # Auxiliary variable update for heavy-tailed prior
+            if self.cfg.use_cauchy_aux:
+                self.cfg.aux_v = (self.mu ** 2 + 1.0) / (2.0 * self.rng.exponential(1.0))
+            _aux_v = self.cfg.aux_v if self.cfg.use_cauchy_aux else 0.0
+
             def lp_theta(th: float) -> float:
-                return logpost_theta_mu_collapsed(th, mu_cache)
+                return logpost_theta_mu_collapsed(th, mu_cache, aux_v=_aux_v)
 
             new_theta, n_shrink = slice_sample_1d(
                 self.rng, self.theta, lp_theta,
@@ -1621,7 +1634,8 @@ def build_mu_collapsed_cache(
 
 
 
-def logpost_theta_mu_collapsed(theta: float, cache: MuCollapsedCache) -> float:
+def logpost_theta_mu_collapsed(theta: float, cache: MuCollapsedCache,
+                               aux_v: float = 0.0) -> float:
     # Guard exp under/overflow
     if theta < -745.0 or theta > 709.0:
         return -np.inf
@@ -1654,10 +1668,15 @@ def logpost_theta_mu_collapsed(theta: float, cache: MuCollapsedCache) -> float:
           - 0.25 * M * mu
           - 0.5 * M * np.log(2.0 * mu))
 
-    # half-Student-t(df, scale) prior on mu + Jacobian for theta=log(mu)
-    s  = float(cache.mu_prior_scale)
-    df = float(cache.mu_prior_df)
-    lp += theta - 0.5 * (df + 1.0) * np.log(1.0 + (mu / s) ** 2 / df)
+    # Prior on mu + Jacobian for theta = log(mu)
+    if aux_v > 0.0:
+        # Conditional prior: HalfNormal(0, aux_v)  [used with auxiliary variable]
+        lp += theta - mu ** 2 / (2.0 * aux_v)
+    else:
+        # Half-Student-t(df, scale) prior (default)
+        s  = float(cache.mu_prior_scale)
+        df = float(cache.mu_prior_df)
+        lp += theta - 0.5 * (df + 1.0) * np.log(1.0 + (mu / s) ** 2 / df)
 
     return float(lp)
 

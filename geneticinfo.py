@@ -338,6 +338,7 @@ def _worker_with_queue(args):
     use_alpha_reparam   = bool(args[10]) if len(args) > 10 else False
     use_phi_correction  = bool(args[11]) if len(args) > 11 else False
     use_collapsed_phi   = bool(args[12]) if len(args) > 12 else False
+    use_cauchy_aux      = bool(args[13]) if len(args) > 13 else False
     q = _POOL_PROGRESS_Q
 
     rng = np.random.default_rng(seed)
@@ -360,6 +361,7 @@ def _worker_with_queue(args):
         use_alpha_reparam=use_alpha_reparam,
         use_phi_correction=use_phi_correction,
         use_collapsed_phi=use_collapsed_phi,
+        use_cauchy_aux=use_cauchy_aux,
     )
 
     sampler = LRDiscreteBlockdiagPGGibbs(
@@ -539,6 +541,7 @@ def sample_posterior(
     use_alpha_reparam: bool = False,
     use_phi_correction: bool = False,
     use_collapsed_phi: bool = True,
+    use_cauchy_aux: bool | None = None,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -617,6 +620,12 @@ def sample_posterior(
         gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
         _print_block_info(block_info)
 
+    # Auto-enable auxiliary variable expansion for heavy-tailed priors.
+    # With mu_prior_df < 10 the tail is heavy enough to cause poor mixing in
+    # the slice sampler; the scale-mixture expansion fixes this at no cost.
+    if use_cauchy_aux is None:
+        use_cauchy_aux = use_collapsed_phi and (mu_prior_df < 10.0)
+
     cfg = _make_chain_config(n_warmup, n_samples, mu_prior_scale, p_prior_conc, mu_prior_df, slice_w)
 
     n_cpu = os.cpu_count() or 1
@@ -637,7 +646,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi, use_cauchy_aux)
             for cid in range(n_chains)
         ]
 
@@ -677,7 +686,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi, use_cauchy_aux)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,
@@ -702,6 +711,7 @@ def sample_posterior(
         "use_alpha_reparam": use_alpha_reparam,
         "use_phi_correction": use_phi_correction,
         "use_collapsed_phi": use_collapsed_phi,
+        "use_cauchy_aux": use_cauchy_aux,
     }
 
 
