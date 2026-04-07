@@ -225,7 +225,7 @@ The uncollapsed sampler holds Z_mix fixed while sampling φ and μ, inducing a p
 python run_comparison.py
 ```
 
-Simulates a large case-control dataset with full-sib pairs, triplets, and half-sib pairs; builds the block structure; runs PG-Gibbs under five conditions (baseline, phi_correction, asis, phi_correction_adapted, collapsed_phi); and prints a side-by-side comparison with trace and pairs plots per condition.
+Simulates a large case-control dataset with full-sib pairs, triplets, and half-sib pairs; builds the block structure; reduces the dataset to relatives only (unrelated singletons contribute no information about λ_S and are discarded); then runs PG-Gibbs with and without ASIS and prints a side-by-side comparison with trace and pairs plots per condition.
 
 ---
 
@@ -326,8 +326,6 @@ Scatter matrix of μ, β₀, p, log-likelihood coloured by chain. The (μ, β₀
 ### Overview
 
 The `lr_discrete_blockdiag` model is fitted with NumPyro's `DiscreteHMCGibbs` (modified=True, NUTS inner kernel). The class indicators r_i ∈ {−1, +1} are discrete latent variables; `DiscreteHMCGibbs` alternates between enumerating over these exactly and running NUTS for the continuous parameters (μ, s, β₀).
-
-**Key preprocessing — reduction to relatives only.**  Unrelated individuals (singletons in the genetic relationship matrix) contribute no information about λ_S and are discarded before fitting.
 
 ### Usage
 
