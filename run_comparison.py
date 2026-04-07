@@ -117,15 +117,16 @@ COMMON = dict(
 )
 
 CONDITIONS = [
-    # (label,                  use_phi_correction, use_asis, jags_adapt)
-    ("baseline",               False,              False,    False),
-    ("phi_correction",         True,               False,    False),
-    ("asis",                   True,               True,     False),
-    ("phi_correction_adapted", True,               False,    True),
+    # (label,                  use_phi_correction, use_asis, jags_adapt, use_collapsed_phi)
+    ("baseline",               False,              False,    False,      False),
+    ("phi_correction",         True,               False,    False,      False),
+    ("asis",                   True,               True,     False,      False),
+    ("phi_correction_adapted", True,               False,    True,       False),
+    ("collapsed_phi",          False,              False,    False,      True),
 ]
 
 results_pg = {}
-for label, use_phi_correction, use_asis, jags_adapt in CONDITIONS:
+for label, use_phi_correction, use_asis, jags_adapt, use_collapsed_phi in CONDITIONS:
     print(f"\n{'=' * 60}")
     print(f"PG-Gibbs  ({label})  4 chains × 5000 samples, 1000 warmup")
     print("=" * 60)
@@ -136,6 +137,7 @@ for label, use_phi_correction, use_asis, jags_adapt in CONDITIONS:
         use_phi_correction=use_phi_correction,
         use_asis=use_asis,
         jags_adapt=jags_adapt,
+        use_collapsed_phi=use_collapsed_phi,
     )
     results_pg[label]["_wall"] = time.perf_counter() - t0
 

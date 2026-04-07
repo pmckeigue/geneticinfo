@@ -950,6 +950,10 @@ class LRBlockdiagPGConfig:
     # re-sample phi from its exact conditional given the new mu.
     use_phi_correction: bool = False
 
+    # collapsed phi update: integrate out Zmix for the phi slice too,
+    # reusing the same eigendecomposition as the theta (mu) update.
+    use_collapsed_phi: bool = False
+
 
 class LRDiscreteBlockdiagPGGibbs:
     """
@@ -1093,79 +1097,108 @@ class LRDiscreteBlockdiagPGGibbs:
     def step(self) -> None:
         # 1) omega | eta
         self.resample_omega()
-    
+
         # 2) Zmix | omega, y, phi, mu, r  (Gaussian)
         self.Zmix = sample_Zmix_given_omega(
             self.rng, self.Lblk, self.omega, self.kappa,
             self.phi, self.mu, self.r, self.v_L1
         )
-    
+
         # 3) r | Zmix, phi  (exact)
         prob_plus = sigmoid_stable(self.Zmix + self.phi)
         u = self.rng.uniform(size=self.Lblk.M)
         self.r = np.where(u < prob_plus, 1.0, -1.0).astype(np.float64)
-    
-        # 4) phi | rest (slice); optionally via alpha = phi - mu*mbar*mean_v
-        # which decouples phi from theta through the prevalence constraint K.
-        if self.cfg.use_alpha_reparam:
-            mbar  = float(np.tanh(0.5 * self.phi))
-            shift = self.mu * mbar * self.mean_v
-            def lp_alpha(alpha: float) -> float:
-                return self.logpost_phi_given_rest(alpha + shift)
-            new_alpha, _ = slice_sample_1d(
-                self.rng, self.phi - shift, lp_alpha,
+
+        if self.cfg.use_collapsed_phi:
+            # Build cache once — eigendecompositions are reused for both
+            # the collapsed phi slice and the collapsed theta (mu) slice.
+            mu_cache = build_mu_collapsed_cache(
+                self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
+                mu_prior_scale=self.cfg.mu_prior_scale,
+                mu_prior_df=self.cfg.mu_prior_df,
+                K_beta=self.cfg.K_beta,
+                p_obs=self.cfg.p_obs,
+                mu=self.mu,
+            )
+
+            # 4) phi | omega, r  (collapsed over Zmix)
+            def lp_phi_col(phi: float) -> float:
+                return logpost_phi_collapsed(phi, mu_cache)
+            self.phi, _ = slice_sample_1d(
+                self.rng, self.phi, lp_phi_col,
                 w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
             )
-            self.phi = new_alpha + shift
+
+            # Update phi-dependent cache fields; reuse eigendecompositions.
+            mu_cache = update_cache_for_new_phi(mu_cache, self.phi)
+
+            # 5) theta | omega, r  (collapsed over Zmix)
+            def lp_theta_col(th: float) -> float:
+                return logpost_theta_mu_collapsed(th, mu_cache)
+            new_theta, n_shrink = slice_sample_1d(
+                self.rng, self.theta, lp_theta_col,
+                w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta,
+            )
+            self._theta_shrink_total += n_shrink
+            self._theta_step_total   += abs(new_theta - self.theta)
+            self._step_count         += 1
+            self.theta = new_theta
+            self.mu    = float(np.exp(self.theta))
+
         else:
-            self.phi, _ = slice_sample_1d(
-                self.rng, self.phi, self.logpost_phi_given_rest,
-                w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+            # 4) phi | rest (slice); optionally via alpha = phi - mu*mbar*mean_v
+            if self.cfg.use_alpha_reparam:
+                mbar  = float(np.tanh(0.5 * self.phi))
+                shift = self.mu * mbar * self.mean_v
+                def lp_alpha(alpha: float) -> float:
+                    return self.logpost_phi_given_rest(alpha + shift)
+                new_alpha, _ = slice_sample_1d(
+                    self.rng, self.phi - shift, lp_alpha,
+                    w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+                )
+                self.phi = new_alpha + shift
+            else:
+                self.phi, _ = slice_sample_1d(
+                    self.rng, self.phi, self.logpost_phi_given_rest,
+                    w=self.cfg.slice_w_phi, m=self.cfg.slice_m_phi,
+                )
+
+            # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
+            mu_before    = self.mu
+            theta_before = self.theta
+            mu_cache = build_mu_collapsed_cache(
+                self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
+                mu_prior_scale=self.cfg.mu_prior_scale,
+                mu_prior_df=self.cfg.mu_prior_df,
             )
-    
-        # 5) mu | omega, r, phi, y  (COLLAPSED over Zmix)
-        mu_before    = self.mu
-        theta_before = self.theta
-        mu_cache = build_mu_collapsed_cache(
-            self.Lblk, self.omega, self.kappa, self.r, self.phi, self.v_L1,
-            mu_prior_scale=self.cfg.mu_prior_scale,
-            mu_prior_df=self.cfg.mu_prior_df,
-        )
 
-        def lp_theta(th: float) -> float:
-            return logpost_theta_mu_collapsed(th, mu_cache)
+            def lp_theta(th: float) -> float:
+                return logpost_theta_mu_collapsed(th, mu_cache)
 
-        new_theta, n_shrink = slice_sample_1d(
-            self.rng, self.theta, lp_theta,
-            w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta
-        )
-        self._theta_shrink_total += n_shrink
-        self._theta_step_total   += abs(new_theta - self.theta)
-        self._step_count         += 1
-        self.theta = new_theta
-        self.mu = float(np.exp(self.theta))
-
-        # 5b) phi correction: shift phi by the first-order K-preserving amount
-        # Δθ·μ_old·tanh(φ/2)·mean_v, then re-sample phi from its exact
-        # conditional given the new mu.  Using Δθ (log-scale) rather than
-        # Δμ = μ_old·(exp(Δθ)-1) prevents exponentially large corrections
-        # from big theta jumps in early warmup.
-        # The re-slice uses m=500 (range = 500·w) to handle corrections that
-        # exceed the normal stepping-out range (e.g. when mu is temporarily
-        # elevated during warmup).  The extra stepping-out cost is negligible
-        # at stationarity because the procedure terminates as soon as
-        # logpdf(L) < y and logpdf(R) < y.
-        if self.cfg.use_phi_correction:
-            delta_theta = new_theta - theta_before
-            phi_corrected = (self.phi
-                             + delta_theta * mu_before
-                             * float(np.tanh(0.5 * self.phi)) * self.mean_v)
-            if np.isfinite(self.logpost_phi_given_rest(phi_corrected)):
-                self.phi = phi_corrected
-            self.phi, _ = slice_sample_1d(
-                self.rng, self.phi, self.logpost_phi_given_rest,
-                w=self.cfg.slice_w_phi, m=500,
+            new_theta, n_shrink = slice_sample_1d(
+                self.rng, self.theta, lp_theta,
+                w=self.cfg.slice_w_theta, m=self.cfg.slice_m_theta,
             )
+            self._theta_shrink_total += n_shrink
+            self._theta_step_total   += abs(new_theta - self.theta)
+            self._step_count         += 1
+            self.theta = new_theta
+            self.mu    = float(np.exp(self.theta))
+
+            # 5b) phi correction: shift phi by the first-order K-preserving amount
+            # Δθ·μ_old·tanh(φ/2)·mean_v, then re-sample phi from its exact
+            # conditional given the new mu.
+            if self.cfg.use_phi_correction:
+                delta_theta = new_theta - theta_before
+                phi_corrected = (self.phi
+                                 + delta_theta * mu_before
+                                 * float(np.tanh(0.5 * self.phi)) * self.mean_v)
+                if np.isfinite(self.logpost_phi_given_rest(phi_corrected)):
+                    self.phi = phi_corrected
+                self.phi, _ = slice_sample_1d(
+                    self.rng, self.phi, self.logpost_phi_given_rest,
+                    w=self.cfg.slice_w_phi, m=500,
+                )
 
         # 6) Refresh Zmix once more under the new mu (optional but usually helps)
         self.Zmix = sample_Zmix_given_omega(
@@ -1449,6 +1482,26 @@ class MuCollapsedCache:
     mu_prior_scale: float     # half-Student-t scale
     mu_prior_df: float        # degrees of freedom
 
+    # ── extra fields for collapsed phi update ──────────────────────────────
+    # h(phi) in eigenbasis = A_flat - phi*B_flat + mu*mbar(phi)*p1_flat
+    A_flat: np.ndarray        # U^T*(L^T*kappa + 0.5*r)  [phi-independent]
+    B_flat: np.ndarray        # U^T*(L^T*omega)          [phi-independent]
+    tau: float                # 1/(2*mu)
+    mu: float                 # current mu value
+
+    # scalar sums for the offset-only terms as a function of phi
+    sum_kappa:   float        # sum(kappa)
+    sum_omega:   float        # sum(omega)
+    sum_kappa_v: float        # sum(kappa * v)
+    sum_omega_v: float        # sum(omega * v)
+    sum_omega_v2: float       # sum(omega * v^2)
+
+    # prior parameters for p = sigmoid(phi)
+    K_beta: float             # Beta prior concentration
+    p_obs:  float             # prior centre (observed case fraction)
+    n_plus: int               # sum(r > 0)
+    n_minus: int              # sum(r < 0)
+
 
 def build_mu_collapsed_cache(
     Lblk,
@@ -1459,15 +1512,22 @@ def build_mu_collapsed_cache(
     v_L1: np.ndarray,          # v = L @ 1
     mu_prior_scale: float,
     mu_prior_df: float = 10.0,
+    K_beta: float = 20.0,
+    p_obs: float = 0.5,
+    mu: float = 1.0,
 ) -> MuCollapsedCache:
     """
-    Build cache for collapsed mu update: integrates out Zmix from the PG-Gaussian.
+    Build cache for collapsed mu and phi updates: integrates out Zmix.
 
     Model pieces:
       eta = offset + L @ Zmix
       offset = phi - (mu*mbar) * v,  mbar = tanh(phi/2)
       Prior: Zmix | r,mu ~ N(mu*r, 2mu I)  -> contributes precision tau I and linear term +0.5 r
       PG: contributes K = L^T Ω L and linear term L^T (kappa - omega*offset)
+
+    The same eigendecomposition of K supports both:
+      - collapsed theta update: p0, p1, c0, c1, c2 (phi fixed)
+      - collapsed phi update:   A, B, p1, scalar sums (mu/tau fixed)
     """
     omega = np.asarray(omega, dtype=np.float64)
     kappa = np.asarray(kappa, dtype=np.float64)
@@ -1476,21 +1536,25 @@ def build_mu_collapsed_cache(
     M     = int(omega.size)
 
     mbar = float(np.tanh(0.5 * phi))
+    tau  = 0.5 / float(mu) if mu > 0.0 else np.inf
 
-    # Constants for the offset-only part:
-    # sum(kappa*offset - 0.5*omega*offset^2) with offset = phi - mu*mbar*v
-    # Expand as: c0 + mu*c1 + mu^2*c2
-    # where:
-    #   c0 = sum(kappa*phi - 0.5*omega*phi^2)
-    #   c1 = mbar * sum(omega*phi*v - kappa*v)
-    #   c2 = -0.5 * mbar^2 * sum(omega*v^2)
+    # Offset-only terms for theta update (c0 + mu*c1 + mu^2*c2 evaluated at current phi):
     c0 = float(np.sum(kappa * phi - 0.5 * omega * (phi * phi)))
     c1 = float(mbar * np.sum(omega * phi * v - kappa * v))
     c2 = float(-0.5 * (mbar * mbar) * np.sum(omega * (v * v)))
 
+    # Scalar sums for collapsed phi update (phi-independent given omega, v, kappa):
+    sum_kappa   = float(np.sum(kappa))
+    sum_omega   = float(np.sum(omega))
+    sum_kappa_v = float(np.sum(kappa * v))
+    sum_omega_v = float(np.sum(omega * v))
+    sum_omega_v2 = float(np.sum(omega * v * v))
+
     eigvals_parts = []
     p0_parts = []
     p1_parts = []
+    A_parts  = []
+    B_parts  = []
 
     for s in Lblk.sizes:
         Ls  = Lblk.blocks_by_size[s]      # (n_s,s,s)
@@ -1505,33 +1569,53 @@ def build_mu_collapsed_cache(
         # mu-independent part of b_like: (kappa - omega*phi)
         b_like0 = kg - og * phi
 
-        # b0 = L^T b_like0 + 0.5 r
+        # b0 = L^T b_like0 + 0.5 r  (for theta update, depends on current phi)
         b0 = np.einsum("nij,ni->nj", Ls, b_like0) + 0.5 * rg   # (n_s,s)
 
-        # b1 = L^T (omega*v)  (this gets multiplied by mu*mbar later)
+        # b1 = L^T (omega*v)  (mu*mbar coefficient, shared by both updates)
         b1 = np.einsum("nij,ni->nj", Ls, og * vg)              # (n_s,s)
 
+        # b_A = L^T*kappa + 0.5*r  (phi=0 baseline of h, for phi update)
+        b_A = np.einsum("nij,ni->nj", Ls, kg) + 0.5 * rg       # (n_s,s)
+
+        # b_B = L^T*omega  (phi linear coefficient in h, for phi update)
+        b_B = np.einsum("nij,ni->nj", Ls, og)                  # (n_s,s)
+
         # K = L^T diag(omega) L (blockwise)
-        # Construct as W = L * sqrt(omega) (row-scaled) then K = W^T W
         W = Ls * np.sqrt(og)[:, :, None]                       # (n_s,s,s)
         K = np.einsum("nki,nkj->nij", W, W)                    # (n_s,s,s)
 
-        # For s small (2,3 in your data) looping over blocks is fine and robust.
         for b in range(n_s):
             lam, U = np.linalg.eigh(K[b])
             eigvals_parts.append(lam)
             p0_parts.append(U.T @ b0[b])
             p1_parts.append(U.T @ b1[b])
+            A_parts.append(U.T @ b_A[b])
+            B_parts.append(U.T @ b_B[b])
 
+    empty = np.empty(0)
     return MuCollapsedCache(
-        eigvals_flat=np.concatenate(eigvals_parts) if eigvals_parts else np.empty(0),
-        p0_flat=np.concatenate(p0_parts) if p0_parts else np.empty(0),
-        p1_flat=np.concatenate(p1_parts) if p1_parts else np.empty(0),
+        eigvals_flat=np.concatenate(eigvals_parts) if eigvals_parts else empty,
+        p0_flat=np.concatenate(p0_parts) if p0_parts else empty,
+        p1_flat=np.concatenate(p1_parts) if p1_parts else empty,
         M=M,
         c0=c0, c1=c1, c2=c2,
         mbar=mbar,
         mu_prior_scale=float(mu_prior_scale),
         mu_prior_df=float(mu_prior_df),
+        A_flat=np.concatenate(A_parts) if A_parts else empty,
+        B_flat=np.concatenate(B_parts) if B_parts else empty,
+        tau=tau,
+        mu=float(mu),
+        sum_kappa=sum_kappa,
+        sum_omega=sum_omega,
+        sum_kappa_v=sum_kappa_v,
+        sum_omega_v=sum_omega_v,
+        sum_omega_v2=sum_omega_v2,
+        K_beta=float(K_beta),
+        p_obs=float(p_obs),
+        n_plus=int(np.sum(r > 0)),
+        n_minus=int(np.sum(r < 0)),
     )
 
 
@@ -1577,6 +1661,90 @@ def logpost_theta_mu_collapsed(theta: float, cache: MuCollapsedCache) -> float:
 
     return float(lp)
 
+
+def logpost_phi_collapsed(phi: float, cache: MuCollapsedCache) -> float:
+    """
+    Log-posterior of phi with Zmix integrated out (collapsed).
+
+    Uses the cached eigendecomposition of K = L^T Ω L.  The collapsed
+    likelihood is:
+
+        offset_terms(phi) + 0.5 * Σ_j h_j(phi)² / (λ_j + τ)
+
+    where h(phi) = A_flat - phi·B_flat + μ·m̄(phi)·p1_flat in the eigenbasis
+    and m̄ = tanh(phi/2).  The log-det term −0.5·Σ log(λ+τ) is phi-independent
+    and is omitted (cancels in acceptance ratio / is absorbed in the normaliser).
+    """
+    mbar = float(np.tanh(0.5 * phi))
+    mu   = cache.mu
+    tau  = cache.tau
+    u    = mu * mbar                         # = μ·m̄
+
+    # Offset-only terms: Σ_i [κ_i·offset_i − 0.5·ω_i·offset_i²]
+    # offset_i = phi − u·v_i
+    ofs_lin  = phi * cache.sum_kappa - u * cache.sum_kappa_v
+    ofs_quad = -0.5 * (phi * phi * cache.sum_omega
+                       - 2.0 * phi * u * cache.sum_omega_v
+                       + u * u * cache.sum_omega_v2)
+
+    # Eigenbasis projection h(phi) = A_flat − phi·B_flat + u·p1_flat
+    h       = cache.A_flat - phi * cache.B_flat + u * cache.p1_flat
+    lam_tau = cache.eigvals_flat + tau
+    quad    = float(np.sum(h * h / lam_tau))
+
+    # Prior on p = sigmoid(phi): Beta + r likelihood + Jacobian (same as phi|rest)
+    a      = float(cache.K_beta * cache.p_obs)
+    b      = float(cache.K_beta * (1.0 - cache.p_obs))
+    logp   = log_sigmoid(phi)
+    log1mp = log1m_sigmoid(phi)
+
+    lp_beta = (a - 1.0) * logp + (b - 1.0) * log1mp
+    lp_r    = float(cache.n_plus) * logp + float(cache.n_minus) * log1mp
+    lp_jac  = logp + log1mp    # Jacobian dp/dphi = p(1−p)
+
+    return ofs_lin + ofs_quad + 0.5 * quad + lp_beta + lp_r + lp_jac
+
+
+def update_cache_for_new_phi(cache: MuCollapsedCache, phi_new: float) -> MuCollapsedCache:
+    """
+    Return an updated MuCollapsedCache after phi changes.
+
+    Reuses the stored eigendecompositions (eigvals_flat, A_flat, B_flat, p1_flat)
+    and recomputes only the phi-dependent fields (p0_flat, mbar, c0, c1, c2)
+    from the cached scalar sums.  Called once per step when use_collapsed_phi=True,
+    between the phi slice and the theta slice.
+    """
+    mbar_new    = float(np.tanh(0.5 * phi_new))
+    p0_flat_new = cache.A_flat - phi_new * cache.B_flat
+
+    c0_new = float(phi_new * cache.sum_kappa
+                   - 0.5 * phi_new * phi_new * cache.sum_omega)
+    c1_new = float(mbar_new * (phi_new * cache.sum_omega_v - cache.sum_kappa_v))
+    c2_new = float(-0.5 * mbar_new * mbar_new * cache.sum_omega_v2)
+
+    return MuCollapsedCache(
+        eigvals_flat=cache.eigvals_flat,
+        p0_flat=p0_flat_new,
+        p1_flat=cache.p1_flat,
+        M=cache.M,
+        c0=c0_new, c1=c1_new, c2=c2_new,
+        mbar=mbar_new,
+        mu_prior_scale=cache.mu_prior_scale,
+        mu_prior_df=cache.mu_prior_df,
+        A_flat=cache.A_flat,
+        B_flat=cache.B_flat,
+        tau=cache.tau,
+        mu=cache.mu,
+        sum_kappa=cache.sum_kappa,
+        sum_omega=cache.sum_omega,
+        sum_kappa_v=cache.sum_kappa_v,
+        sum_omega_v=cache.sum_omega_v,
+        sum_omega_v2=cache.sum_omega_v2,
+        K_beta=cache.K_beta,
+        p_obs=cache.p_obs,
+        n_plus=cache.n_plus,
+        n_minus=cache.n_minus,
+    )
 
 
 # ----------------------------- example ------------------------------------

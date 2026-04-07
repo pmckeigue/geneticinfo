@@ -337,6 +337,7 @@ def _worker_with_queue(args):
     use_asis            = bool(args[9]) if len(args) > 9 else False
     use_alpha_reparam   = bool(args[10]) if len(args) > 10 else False
     use_phi_correction  = bool(args[11]) if len(args) > 11 else False
+    use_collapsed_phi   = bool(args[12]) if len(args) > 12 else False
     q = _POOL_PROGRESS_Q
 
     rng = np.random.default_rng(seed)
@@ -358,6 +359,7 @@ def _worker_with_queue(args):
         slice_m_theta=int(cfg.slice_m),
         use_alpha_reparam=use_alpha_reparam,
         use_phi_correction=use_phi_correction,
+        use_collapsed_phi=use_collapsed_phi,
     )
 
     sampler = LRDiscreteBlockdiagPGGibbs(
@@ -536,6 +538,7 @@ def sample_posterior(
     use_asis: bool = False,
     use_alpha_reparam: bool = False,
     use_phi_correction: bool = False,
+    use_collapsed_phi: bool = True,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -634,7 +637,7 @@ def sample_posterior(
         _POOL_PROGRESS_Q = ctx.Queue()
 
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi)
             for cid in range(n_chains)
         ]
 
@@ -674,7 +677,7 @@ def sample_posterior(
         print()  # newline after the stacked bars
     else:
         jobs = [
-            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction)
+            (cid, gb, y_perm, seed + cid, cfg, float("nan"), p_obs, jags_adapt, n_warmup_phase1, use_asis, use_alpha_reparam, use_phi_correction, use_collapsed_phi)
             for cid in range(n_chains)
         ]
         with ctx.Pool(processes=n_chains,
@@ -698,6 +701,7 @@ def sample_posterior(
         "use_asis": use_asis,
         "use_alpha_reparam": use_alpha_reparam,
         "use_phi_correction": use_phi_correction,
+        "use_collapsed_phi": use_collapsed_phi,
     }
 
 
