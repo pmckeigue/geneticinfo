@@ -45,67 +45,29 @@ M = info["M"]
 p_obs = float(np.mean(y_sample))
 
 # ── 2. Build shared block structure ──────────────────────────────────────────
-from polyagamma_gibbs import infer_blocks_from_L, BlockStructure
-from pg_gibbs_vectorized import GroupedBlocks
+from geneticinfo import build_blocks, sample_posterior, summarize_and_plot, plot_trace, plot_pairs
 
 L_np = np.asarray(L_sample, dtype=np.float64)
 y_np = np.asarray(y_sample, dtype=np.float64)
-perm_rows, perm_cols, row_slices, col_slices = infer_blocks_from_L(L_np, tol_rel=0.0)
-L_perm = L_np[perm_rows, :][:, perm_cols]
-y_perm = y_np[perm_rows]
-bs = BlockStructure(L_perm, col_slices, row_slices)
-gb = GroupedBlocks.from_block_structure(bs)
-print(f"\nBlock structure:  M={gb.M}  blocks={bs.n_blocks}  "
-      + "  ".join(f"size-{s}:{gb.L_by_size[s].shape[0]}" for s in gb.sizes))
-
-M_rel = sum(gb.L_by_size[s].shape[0] * s for s in gb.sizes if s >= 2)
-print(f"  Relatives only: M_rel={M_rel}")
+blocks = build_blocks(L_np, y_np)
+gb     = blocks["gb"]
+y_perm = blocks["y_perm"]
+M_rel  = sum(gb.L_by_size[s].shape[0] * s for s in gb.sizes if s >= 2)
 
 # ── 3. PG-Gibbs (collapsed_phi, half-Cauchy prior) ───────────────────────────
 print(f"\n{'=' * 60}")
 print(f"PG-Gibbs (collapsed_phi, half-Cauchy prior)  4 chains × 5000 samples")
 print("=" * 60)
 
-# Build dense relatives-only L for sample_posterior
-rel_sizes = sorted([s for s in gb.sizes if s >= 2], reverse=True)
-rel_idx_ordered = np.concatenate([gb.idx_by_size[s] for s in rel_sizes])
-y_rel = y_perm[rel_idx_ordered]
-
-new_L_by_size, new_idx_by_size = {}, {}
-offset = 0
-for s in rel_sizes:
-    n_s = gb.L_by_size[s].shape[0]
-    new_L_by_size[s]   = gb.L_by_size[s]
-    new_idx_by_size[s] = np.arange(offset, offset + n_s * s)
-    offset += n_s * s
-
-gb_rel = GroupedBlocks(M=M_rel, sizes=rel_sizes,
-                       L_by_size=new_L_by_size, idx_by_size=new_idx_by_size)
-
-def dense_from_groupedblocks(gb_):
-    L = np.zeros((gb_.M, gb_.M), dtype=np.float64)
-    for s in gb_.sizes:
-        Ls  = gb_.L_by_size[s]
-        idx = gb_.idx_by_size[s].reshape(-1, s)
-        for b in range(Ls.shape[0]):
-            sl = idx[b]
-            L[np.ix_(sl, sl)] = Ls[b]
-    return L
-
-L_rel = dense_from_groupedblocks(gb_rel)
-
-from geneticinfo import sample_posterior, summarize_and_plot, plot_trace, plot_pairs
-
 t0 = time.perf_counter()
 result_pg = sample_posterior(
-    L_rel, y_rel,
+    L_np, y_np,
+    blocks=blocks,
     n_warmup=2000, n_samples=5000, n_chains=4, n_blas_threads=1,
-    mu_prior_scale=1.0,
-    mu_prior_df=1.0,          # half-Cauchy — same prior as DiscreteHMCGibbs
-    use_collapsed_phi=True,
-    use_cauchy_aux=True,      # scale-mixture auxiliary variable for heavy-tailed prior
-    jags_adapt=True,          # also adapt slice widths during warmup
+    jags_adapt=True,          # adapt slice widths during warmup
     n_warmup_phase1=300,      # 300 fixed-width iterations before adaptation starts
+    # defaults: mu_prior_df=1.0 (half-Cauchy), use_collapsed_phi=True,
+    #           use_cauchy_aux auto-enabled, omit_singletons=True
 )
 t_pg = time.perf_counter() - t0
 result_pg["_wall"] = t_pg
@@ -180,8 +142,9 @@ G_hmc = np.array(samps["G"])          # (n_chains, n_samples, M_rel)
 eta   = beta0_hmc[:, :, None] + G_hmc
 ll_pos = -np.log1p(np.exp(-np.clip(eta, -500, 500)))
 ll_neg = -np.log1p(np.exp( np.clip(eta, -500, 500)))
-ll_hmc = (y_rel[None, None, :] * ll_pos
-          + (1 - y_rel)[None, None, :] * ll_neg).sum(axis=-1)
+y_rel_hmc = np.concatenate([np.array(yl) for yl in hmc_y_list])
+ll_hmc = (y_rel_hmc[None, None, :] * ll_pos
+          + (1 - y_rel_hmc)[None, None, :] * ll_neg).sum(axis=-1)
 
 mu_all_hmc = mu_chains_hmc.ravel()
 

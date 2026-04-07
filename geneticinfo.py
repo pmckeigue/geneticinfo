@@ -477,6 +477,28 @@ def _worker_with_queue(args):
 
 # ─── public API ──────────────────────────────────────────────────────────────
 
+def _omit_singletons(
+    gb: GroupedBlocks,
+    y_perm: np.ndarray,
+) -> tuple[GroupedBlocks, np.ndarray]:
+    """Return a new (GroupedBlocks, y_perm) with size-1 blocks removed."""
+    rel_sizes = sorted([s for s in gb.sizes if s >= 2], reverse=True)
+    if not rel_sizes:
+        return gb, y_perm
+    rel_idx = np.concatenate([gb.idx_by_size[s] for s in rel_sizes])
+    y_rel = y_perm[rel_idx]
+    new_L_by_size, new_idx_by_size = {}, {}
+    offset = 0
+    for s in rel_sizes:
+        n_s = gb.L_by_size[s].shape[0]
+        new_L_by_size[s]   = gb.L_by_size[s]
+        new_idx_by_size[s] = np.arange(offset, offset + n_s * s)
+        offset += n_s * s
+    gb_rel = GroupedBlocks(M=offset, sizes=rel_sizes,
+                           L_by_size=new_L_by_size, idx_by_size=new_idx_by_size)
+    return gb_rel, y_rel
+
+
 def build_blocks(
     L: np.ndarray,
     y: np.ndarray,
@@ -542,6 +564,7 @@ def sample_posterior(
     use_phi_correction: bool = False,
     use_collapsed_phi: bool = True,
     use_cauchy_aux: bool | None = None,
+    omit_singletons: bool = True,
 ) -> dict:
     """
     Sample the posterior distribution of mu (genetic information, nats) using
@@ -619,6 +642,11 @@ def sample_posterior(
             raise ValueError("y must contain only 0s and 1s")
         gb, y_perm, block_info = _build_block_structure(L, y, corr_threshold=corr_threshold)
         _print_block_info(block_info)
+
+    if omit_singletons and 1 in gb.L_by_size:
+        n_sing = int(gb.L_by_size[1].shape[0])
+        gb, y_perm = _omit_singletons(gb, y_perm)
+        print(f"  Omitted {n_sing} singletons; M_rel={gb.M}")
 
     # Auto-enable auxiliary variable expansion for heavy-tailed priors.
     # With mu_prior_df < 10 the tail is heavy enough to cause poor mixing in
@@ -955,7 +983,8 @@ def plot_pairs(
     """
     Pairs (scatter matrix) plot of global parameters from the sampling period.
 
-    Variables: mu, beta0, p, ll (log-likelihood).
+    Variables: mu, p, ll (log-likelihood).  beta0 = phi = logit(p) is omitted
+    as it is not independently variable from p.
     Diagonal: KDE density.  Off-diagonal: scatter coloured by chain.
 
     Parameters
@@ -969,22 +998,16 @@ def plot_pairs(
     colors      = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
     # Collect per-chain arrays; shape (n_chains, n_samples) each
-    mu_chains   = np.vstack([d["mu"]    for d in chain_dicts])
-    beta0_chains = np.vstack([d["beta0"] for d in chain_dicts])
-    p_chains    = np.vstack([d["p"]     for d in chain_dicts])
-    ll_chains   = np.vstack([d["ll"]    for d in chain_dicts])
+    mu_chains = np.vstack([d["mu"] for d in chain_dicts])
+    p_chains  = np.vstack([d["p"]  for d in chain_dicts])
+    ll_chains = np.vstack([d["ll"] for d in chain_dicts])
 
-    var_names  = ["mu", "beta0", "p", "log-lik"]
-    data_all   = [
-        mu_chains.ravel(),
-        beta0_chains.ravel(),
-        p_chains.ravel(),
-        ll_chains.ravel(),
-    ]
-    chain_ids  = np.repeat(np.arange(n_chains), mu_chains.shape[1])
-    n_vars     = len(var_names)
+    var_names = ["mu", "p", "log-lik"]
+    data_all  = [mu_chains.ravel(), p_chains.ravel(), ll_chains.ravel()]
+    chain_ids = np.repeat(np.arange(n_chains), mu_chains.shape[1])
+    n_vars    = len(var_names)
 
-    fig, axes = plt.subplots(n_vars, n_vars, figsize=(10, 10))
+    fig, axes = plt.subplots(n_vars, n_vars, figsize=(8, 8))
     for i in range(n_vars):
         for j in range(n_vars):
             ax = axes[i, j]

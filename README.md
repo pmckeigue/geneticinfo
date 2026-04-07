@@ -115,7 +115,7 @@ plot_pairs(result, outfile=None, title="")
 
 `plot_trace` shows warmup and sampling iterations for μ and log-likelihood (one line per chain, warmup at α=0.4, sampling at α=0.8, vertical dashed line at the warmup boundary).  Annotates per-chain ESS and R̂.
 
-`plot_pairs` shows a scatter matrix of the four global parameters (μ, β₀, p, log-likelihood) from the sampling period: KDE on the diagonal, scatter coloured by chain off-diagonal.
+`plot_pairs` shows a scatter matrix of the three global parameters (μ, p, log-likelihood) from the sampling period: KDE on the diagonal, scatter coloured by chain off-diagonal.  β₀ = logit(p) is omitted as it carries no information beyond p.
 
 ### Example
 
@@ -143,15 +143,6 @@ summarize_and_plot(result, mu_true=2.0, outfile="posterior.png")
 plot_trace(result, outfile="trace.png")
 plot_pairs(result, outfile="pairs.png")
 ```
-
-### Files
-
-| File | Role |
-|---|---|
-| `geneticinfo.py` | Public module: `sample_posterior`, `summarize_and_plot`, `plot_trace`, `plot_pairs` |
-| `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs`, `_worker_preloaded_lrpg` |
-| `pg_gibbs_vectorized.py` | `GroupedBlocks` (block-by-size storage and mat-vec) |
-| `polyagamma_gibbs.py` | `infer_blocks_from_L`, `BlockStructure`, `ChainConfig` |
 
 ---
 
@@ -356,13 +347,13 @@ See `run_hmc_comparison.py` for the full script including data preparation and p
 
 | File | Description |
 |---|---|
-| `geneticinfo.py` | Public module: `sample_posterior`, `summarize_and_plot`, `plot_trace`, `plot_pairs` |
-| `geneticinfo_functions.py` | Model definitions, block-diagonal preprocessing, SVI fitting, and simulation |
-| `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs` sampler; `MuCollapsedCache`; `build_mu_collapsed_cache`; `logpost_phi_collapsed`; `update_cache_for_new_phi` |
+| `geneticinfo.py` | Public API: `build_blocks`, `sample_posterior`, `summarize_and_plot`, `plot_trace`, `plot_pairs` |
+| `geneticinfo_functions.py` | NumPyro model definitions (`lr_discrete_blockdiag`), simulation (`simulate_casecontrol_related`) |
+| `pg_gibbs_clean.py` | `LRDiscreteBlockdiagPGGibbs` sampler; `LRBlockdiagPGConfig`; `MuCollapsedCache`; `build_mu_collapsed_cache`; `logpost_theta_mu_collapsed` |
 | `pg_gibbs_vectorized.py` | `GroupedBlocks` (block-by-size storage and mat-vec) |
-| `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |
-| `run_comparison.py` | Run PG-Gibbs conditions (baseline, phi_correction, collapsed_phi, …); save plots |
-| `run_hmc_comparison.py` | Head-to-head comparison of PG-Gibbs (collapsed_phi) and DiscreteHMCGibbs with identical half-Cauchy(scale=1) prior |
+| `polyagamma_gibbs.py` | Lower-level utilities: `slice_sample_1d`, `infer_blocks_from_L`, `BlockStructure` |
+| `run_comparison.py` | Compare PG-Gibbs with and without ASIS on simulated data; save plots |
+| `run_hmc_comparison.py` | Head-to-head comparison of PG-Gibbs and DiscreteHMCGibbs with identical half-Cauchy(scale=1) prior |
 
 ## References
 
