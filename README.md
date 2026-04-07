@@ -252,15 +252,9 @@ Related individuals (block size ≥ 2):  M_rel = 1,374
 
 Both samplers operate on M_rel = 1,374 relatives only.
 
-**Results (true μ = 2.0)**
+**Results (true μ = 2.0, both samplers use half-Cauchy(scale=1) prior)**
 
-```
-Algorithm                median    sd      90% CI           ESS    ESS/s   r_hat   wall    hardware
-PG-Gibbs (collapsed_phi) 2.055  0.542  [1.323, 3.094]      424     3.6    1.010   119 s   CPU, 4 cores
-DiscreteHMCGibbs         2.116  0.911  [1.244, 4.060]      234     0.7    1.020   335 s   GPU, 4× V100
-```
-
-PG-Gibbs achieves **5× higher ESS per second** than DiscreteHMCGibbs, using only CPU.  The wider posterior for DiscreteHMCGibbs reflects its heavier half-Cauchy(1) prior compared with the half-Student-t(df=30, scale=1) prior used by PG-Gibbs.  Both 90% CIs contain the true value.
+Run `python run_hmc_comparison.py` to reproduce (requires 4 GPUs for the DiscreteHMCGibbs section).
 
 **Algorithm comparison**
 
@@ -273,43 +267,39 @@ PG-Gibbs achieves **5× higher ESS per second** than DiscreteHMCGibbs, using onl
 | Discrete r_i update | Exact Bernoulli given Z_mix | Exact enumeration (config_enumerate) |
 | μ update | Slice on collapsed log p(μ \| ω, r, φ, y) | NUTS (joint with φ, Z) |
 | φ update | Slice on collapsed log p(φ \| ω, r, y) | NUTS (joint with μ, Z) |
-| μ prior | half-Student-t(df=30, scale=1) | half-Cauchy(scale=1) |
+| μ prior | half-Cauchy(scale=1) | half-Cauchy(scale=1) |
 | φ prior | Beta(20·p_obs, 20·(1−p_obs)) | same |
 | Chains × samples | 4 × 5,000 | 4 × 2,000 |
-| ESS (bulk, μ) | 424 | 234 |
-| ESS per sample | 2.1 % | 2.9 % |
-| ESS per second | 3.6 | 0.7 |
-| Wall time | 119 s | 335 s |
 
-### PG-Gibbs (collapsed_phi): prior, posterior and likelihood
+### PG-Gibbs (collapsed_phi, half-Cauchy prior): prior, posterior and likelihood
 
-![PG-Gibbs: Prior, posterior and likelihood](comparison_posterior_collapsed_phi.png)
+![PG-Gibbs: Prior, posterior and likelihood](comparison_pg_posterior.png)
 
-Half-Student-t(df=30, scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line. Posterior median 2.06, 90% CI [1.32, 3.09].
+Half-Cauchy(scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line.
 
-### PG-Gibbs (collapsed_phi): trace plots
+### PG-Gibbs (collapsed_phi, half-Cauchy prior): trace plots
 
-![PG-Gibbs: Trace of μ and log-likelihood](comparison_trace_collapsed_phi.png)
+![PG-Gibbs: Trace of μ and log-likelihood](comparison_pg_trace.png)
 
-Warmup iterations at half opacity; vertical dashed line marks end of warmup. All four chains mix well across the sampling period (R-hat = 1.010).
+Warmup iterations at half opacity; vertical dashed line marks end of warmup.
 
-### PG-Gibbs (collapsed_phi): pairs plots
+### PG-Gibbs (collapsed_phi, half-Cauchy prior): pairs plots
 
-![PG-Gibbs: Pairs of global parameters](comparison_pairs_collapsed_phi.png)
+![PG-Gibbs: Pairs of global parameters](comparison_pg_pairs.png)
 
-Scatter matrix of μ, β₀, p, log-likelihood coloured by chain. The (μ, β₀) correlation (≈ 0.73) is the posterior ridge that motivates the collapsed update.
+Scatter matrix of μ, β₀, p, log-likelihood coloured by chain. The (μ, β₀) correlation is the posterior ridge that motivates the collapsed update.
 
 ### DiscreteHMCGibbs: prior, posterior and likelihood
 
 ![DiscreteHMCGibbs: Prior, posterior and likelihood](comparison_hmc_posterior.png)
 
-Half-Cauchy(scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line. Posterior median 2.12, 90% CI [1.24, 4.06]. The wider interval compared to PG-Gibbs reflects the heavier-tailed half-Cauchy prior.
+Half-Cauchy(scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line.
 
 ### DiscreteHMCGibbs: trace plots
 
 ![DiscreteHMCGibbs: Trace of μ and log-likelihood](comparison_hmc_trace.png)
 
-Sampling period only (warmup not collected). All four chains sample the same region (R-hat = 1.010), confirming convergence.
+Sampling period only (warmup not collected).
 
 ### DiscreteHMCGibbs: pairs plots
 
@@ -362,7 +352,7 @@ See `run_hmc_comparison.py` for the full script including data preparation and p
 | `pg_gibbs_vectorized.py` | `GroupedBlocks` (block-by-size storage and mat-vec) |
 | `polyagamma_gibbs.py` | Lower-level PG-Gibbs utilities: slice sampler, block structure, PG helpers |
 | `run_comparison.py` | Run PG-Gibbs conditions (baseline, phi_correction, collapsed_phi, …); save plots |
-| `run_hmc_comparison.py` | Run DiscreteHMCGibbs on the same simulated dataset; generate comparison plots |
+| `run_hmc_comparison.py` | Head-to-head comparison of PG-Gibbs (collapsed_phi) and DiscreteHMCGibbs with identical half-Cauchy(scale=1) prior |
 
 ## References
 
