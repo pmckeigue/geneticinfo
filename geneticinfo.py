@@ -911,11 +911,14 @@ def plot_trace(
         axes[1].plot(iters_wu, ll_wu[c], alpha=0.40, lw=0.7, color=col)
         axes[1].plot(iters_sa, ll_sa[c], alpha=0.80, lw=0.8, color=col)
     for ax in axes:
-        ax.axvline(n_wu, color="k", ls="--", lw=1.2, label=f"sampling start (iter {n_wu})")
+        if n_wu > 0:
+            ax.axvline(n_wu, color="k", ls="--", lw=1.2,
+                       label=f"sampling start (iter {n_wu})")
         ax.legend(fontsize=8)
     axes[0].set_ylabel("mu")
+    wu_label = f"n_warmup={n_wu}  " if n_wu > 0 else ""
     axes[0].set_title(
-        f"{title}  n_warmup={n_wu}  n_samples={n_sa}  "
+        f"{title}  {wu_label}n_samples={n_sa}  "
         f"ESS={ess:.0f}  R-hat={rhat:.3f}"
     )
     axes[1].set_ylabel("log-likelihood")
