@@ -914,7 +914,7 @@ def plot_trace(
         if n_wu > 0:
             ax.axvline(n_wu, color="k", ls="--", lw=1.2,
                        label=f"sampling start (iter {n_wu})")
-        ax.legend(fontsize=8)
+            ax.legend(fontsize=8)
     axes[0].set_ylabel("mu")
     wu_label = f"n_warmup={n_wu}  " if n_wu > 0 else ""
     axes[0].set_title(

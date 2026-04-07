@@ -176,7 +176,7 @@ result_hmc = {
     ],
     "cfg":           _Cfg(n_warmup=0, n_samples=n_sa),
     "mu_prior_scale": 1.0,
-    "mu_prior_df":    30.0,
+    "mu_prior_df":    1.0,   # half-Cauchy (df=1) — default prior in lr_discrete_blockdiag
     "block_info":    {},
 }
 

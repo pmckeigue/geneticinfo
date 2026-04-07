@@ -257,10 +257,10 @@ Both samplers operate on M_rel = 1,374 relatives only.
 ```
 Algorithm                median    sd      90% CI           ESS    ESS/s   r_hat   wall    hardware
 PG-Gibbs (collapsed_phi) 2.055  0.542  [1.323, 3.094]      424     3.6    1.010   119 s   CPU, 4 cores
-DiscreteHMCGibbs         2.191  0.957  [1.218, 4.209]      229     0.7    1.010   335 s   GPU, 4× V100
+DiscreteHMCGibbs         2.116  0.911  [1.244, 4.060]      234     0.7    1.020   335 s   GPU, 4× V100
 ```
 
-PG-Gibbs achieves **5× higher ESS per second** than DiscreteHMCGibbs, using only CPU.  The wider posterior for DiscreteHMCGibbs reflects its heavier default prior (half-Cauchy vs half-Student-t(df=30) for PG-Gibbs).  Both 90% CIs contain the true value.
+PG-Gibbs achieves **5× higher ESS per second** than DiscreteHMCGibbs, using only CPU.  The wider posterior for DiscreteHMCGibbs reflects its heavier half-Cauchy(1) prior compared with the half-Student-t(df=30, scale=1) prior used by PG-Gibbs.  Both 90% CIs contain the true value.
 
 **Algorithm comparison**
 
@@ -276,7 +276,7 @@ PG-Gibbs achieves **5× higher ESS per second** than DiscreteHMCGibbs, using onl
 | μ prior | half-Student-t(df=30, scale=1) | half-Cauchy(scale=1) |
 | φ prior | Beta(20·p_obs, 20·(1−p_obs)) | same |
 | Chains × samples | 4 × 5,000 | 4 × 2,000 |
-| ESS (bulk, μ) | 424 | 229 |
+| ESS (bulk, μ) | 424 | 234 |
 | ESS per sample | 2.1 % | 2.9 % |
 | ESS per second | 3.6 | 0.7 |
 | Wall time | 119 s | 335 s |
@@ -303,7 +303,7 @@ Scatter matrix of μ, β₀, p, log-likelihood coloured by chain. The (μ, β₀
 
 ![DiscreteHMCGibbs: Prior, posterior and likelihood](comparison_hmc_posterior.png)
 
-Half-Cauchy(scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line. Posterior median 2.19, 90% CI [1.22, 4.21]. The wider interval compared to PG-Gibbs reflects the heavier-tailed prior.
+Half-Cauchy(scale=1) prior (dashed gray), posterior KDE (solid blue), log-likelihood (dot-dash red, right axis). True μ = 2.0 shown as a vertical dashed line. Posterior median 2.12, 90% CI [1.24, 4.06]. The wider interval compared to PG-Gibbs reflects the heavier-tailed half-Cauchy prior.
 
 ### DiscreteHMCGibbs: trace plots
 
