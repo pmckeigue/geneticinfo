@@ -772,14 +772,16 @@ def summarize_and_plot(
 
     Returns
     -------
-    dict with keys: mean, median, sd, ci90_lo, ci90_hi, ess_bulk, r_hat
+    dict with keys: mle, ci90_lik_lo, ci90_lik_hi, mean, median, sd, ess_bulk, r_hat
     """
     mu_chains = result["mu_chains"]          # (n_chains, n_samples)
     mu_all = result["mu_all"]
     scale = prior_scale if prior_scale is not None else result["mu_prior_scale"]
     df    = float(result.get("mu_prior_df", 10.0))
 
-    # ── summary statistics ──────────────────────────────────────────────────
+    n_chains, n_samples = mu_chains.shape
+
+    # ── ESS / R-hat ─────────────────────────────────────────────────────────
     idata = az.convert_to_inference_data({"mu": mu_chains})
     summ = az.summary(idata, var_names=["mu"])
     ess = float(summ["ess_bulk"].iloc[0])
@@ -788,24 +790,8 @@ def summarize_and_plot(
     mean_mu = float(np.mean(mu_all))
     median_mu = float(np.median(mu_all))
     sd_mu = float(np.std(mu_all))
-    ci90_lo = float(np.percentile(mu_all, 5))
-    ci90_hi = float(np.percentile(mu_all, 95))
 
-    n_chains, n_samples = mu_chains.shape
-
-    print(f"\nPG-Gibbs posterior summary for mu (genetic information, nats)")
-    print(f"  Chains: {n_chains}    Samples/chain: {n_samples}")
-    bi = result.get("block_info", {})
-    if bi:
-        print(f"  M={bi['M']}  n_blocks={bi['n_blocks']}  "
-              + "  ".join(f"size-{s}:{bi['sizes_summary'][s]}" for s in sorted(bi['sizes_summary'])))
-    print(f"  mean   = {mean_mu:.4f}")
-    print(f"  median = {median_mu:.4f}")
-    print(f"  sd     = {sd_mu:.4f}")
-    print(f"  90% CI = [{ci90_lo:.4f}, {ci90_hi:.4f}]")
-    print(f"  ESS_bulk = {ess:.0f}    R-hat = {rhat:.4f}")
-
-    # ── plot ────────────────────────────────────────────────────────────────
+    # ── likelihood profile (needed for MLE and likelihood CI) ───────────────
     mu_max = max(4.0, float(np.percentile(mu_all, 99)) * 1.6)
     mu_grid = np.linspace(1e-4, mu_max, 600)
 
@@ -828,6 +814,24 @@ def summarize_and_plot(
     log_lik_masked = np.where(reliable, log_lik, np.nan)
     # Rescale so the maximum of the masked values is 0.
     log_lik_masked -= np.nanmax(log_lik_masked)
+
+    # MLE and asymptotic 90% likelihood CI (log-lik drop ≤ 1.35 nats).
+    mle = float(mu_grid[np.nanargmax(log_lik_masked)])
+    in_ci = np.where(log_lik_masked >= -1.35)[0]
+    ci90_lik_lo = float(mu_grid[in_ci[0]])  if len(in_ci) else float("nan")
+    ci90_lik_hi = float(mu_grid[in_ci[-1]]) if len(in_ci) else float("nan")
+
+    # ── summary print ───────────────────────────────────────────────────────
+    print(f"\nPG-Gibbs summary for mu (genetic information, nats)")
+    print(f"  Chains: {n_chains}    Samples/chain: {n_samples}")
+    bi = result.get("block_info", {})
+    if bi:
+        print(f"  M={bi['M']}  n_blocks={bi['n_blocks']}  "
+              + "  ".join(f"size-{s}:{bi['sizes_summary'][s]}" for s in sorted(bi['sizes_summary'])))
+    print(f"  MLE    = {mle:.4f}")
+    print(f"  90% likelihood CI = [{ci90_lik_lo:.4f}, {ci90_lik_hi:.4f}]")
+    print(f"  mean   = {mean_mu:.4f}  median = {median_mu:.4f}  sd = {sd_mu:.4f}")
+    print(f"  ESS_bulk = {ess:.0f}    R-hat = {rhat:.4f}")
 
     fig, ax = plt.subplots(figsize=(8, 5))
 
@@ -867,8 +871,8 @@ def summarize_and_plot(
 
     ax.text(
         0.97, 0.95,
-        f"median = {median_mu:.3f}\n"
-        f"90% CI = [{ci90_lo:.3f}, {ci90_hi:.3f}]\n"
+        f"MLE = {mle:.3f}\n"
+        f"90% lik CI = [{ci90_lik_lo:.3f}, {ci90_lik_hi:.3f}]\n"
         f"ESS = {ess:.0f}\n"
         f"$\\hat{{R}}$ = {rhat:.3f}",
         transform=ax.transAxes, ha="right", va="top", fontsize=9,
@@ -891,11 +895,12 @@ def summarize_and_plot(
     plt.close(fig)
 
     return {
+        "mle": mle,
+        "ci90_lik_lo": ci90_lik_lo,
+        "ci90_lik_hi": ci90_lik_hi,
         "mean": mean_mu,
         "median": median_mu,
         "sd": sd_mu,
-        "ci90_lo": ci90_lo,
-        "ci90_hi": ci90_hi,
         "ess_bulk": ess,
         "r_hat": rhat,
     }
